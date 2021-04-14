@@ -1,10 +1,18 @@
-/* Broadcom FlexRM Mailbox Driver
- *
+/*
  * Copyright (C) 2017 Broadcom
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+/*
+ * Broadcom FlexRM Mailbox Driver
  *
  * Each Broadcom FlexSparx4 offload engine is implemented as an
  * extension to Broadcom FlexRM ring manager. The FlexRM ring
@@ -19,6 +27,7 @@
 #include <asm/byteorder.h>
 #include <linux/atomic.h>
 #include <linux/bitmap.h>
+#include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -283,6 +292,9 @@ struct flexrm_ring {
 struct flexrm_mbox {
 	struct device *dev;
 	void __iomem *regs;
+	struct clk *dme_rm_clk;
+	struct clk *ae_clk;
+	struct clk *fs4_clk;
 	u32 num_rings;
 	struct flexrm_ring *rings;
 	struct dma_pool *bd_pool;
@@ -1116,8 +1128,8 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 		err = flexrm_cmpl_desc_to_error(desc);
 		if (err < 0) {
 			dev_warn(ring->mbox->dev,
-				 "got completion desc=0x%lx with error %d",
-				 (unsigned long)desc, err);
+			"ring%d got completion desc=0x%lx with error %d\n",
+			ring->num, (unsigned long)desc, err);
 		}
 
 		/* Determine request id from completion descriptor */
@@ -1127,8 +1139,8 @@ static int flexrm_process_completions(struct flexrm_ring *ring)
 		msg = ring->requests[reqid];
 		if (!msg) {
 			dev_warn(ring->mbox->dev,
-				 "null msg pointer for completion desc=0x%lx",
-				 (unsigned long)desc);
+			"ring%d null msg pointer for completion desc=0x%lx\n",
+			ring->num, (unsigned long)desc);
 			continue;
 		}
 
@@ -1181,10 +1193,19 @@ static int flexrm_debugfs_stats_show(struct seq_file *file, void *offset)
 
 static irqreturn_t flexrm_irq_event(int irq, void *dev_id)
 {
-	/* We only have MSI for completions so just wakeup IRQ thread */
-	/* Ring related errors will be informed via completion descriptors */
+	struct flexrm_ring *ring = (struct flexrm_ring *)dev_id;
+	u32 cmpl_write_offset;
 
-	return IRQ_WAKE_THREAD;
+	cmpl_write_offset = readl_relaxed(ring->regs + RING_CMPL_WRITE_PTR);
+	cmpl_write_offset *= RING_DESC_SIZE;
+	/*
+	 * Don't schedule irq thread if there is no data to process.
+	 * It means peek_data() has already processed all data.
+	 */
+	if (cmpl_write_offset == ring->cmpl_read_offset)
+		return IRQ_HANDLED;
+	else
+		return IRQ_WAKE_THREAD;
 }
 
 static irqreturn_t flexrm_irq_thread(int irq, void *dev_id)
@@ -1238,7 +1259,9 @@ static int flexrm_startup(struct mbox_chan *chan)
 	ring->bd_base = dma_pool_alloc(ring->mbox->bd_pool,
 				       GFP_KERNEL, &ring->bd_dma_base);
 	if (!ring->bd_base) {
-		dev_err(ring->mbox->dev, "can't allocate BD memory\n");
+		dev_err(ring->mbox->dev,
+			"can't allocate BD memory for ring%d\n",
+			ring->num);
 		ret = -ENOMEM;
 		goto fail;
 	}
@@ -1261,7 +1284,9 @@ static int flexrm_startup(struct mbox_chan *chan)
 	ring->cmpl_base = dma_pool_alloc(ring->mbox->cmpl_pool,
 					 GFP_KERNEL, &ring->cmpl_dma_base);
 	if (!ring->cmpl_base) {
-		dev_err(ring->mbox->dev, "can't allocate completion memory\n");
+		dev_err(ring->mbox->dev,
+			"can't allocate completion memory for ring%d\n",
+			ring->num);
 		ret = -ENOMEM;
 		goto fail_free_bd_memory;
 	}
@@ -1269,7 +1294,8 @@ static int flexrm_startup(struct mbox_chan *chan)
 
 	/* Request IRQ */
 	if (ring->irq == UINT_MAX) {
-		dev_err(ring->mbox->dev, "ring IRQ not available\n");
+		dev_err(ring->mbox->dev,
+			"ring%d IRQ not available\n", ring->num);
 		ret = -ENODEV;
 		goto fail_free_cmpl_memory;
 	}
@@ -1278,7 +1304,8 @@ static int flexrm_startup(struct mbox_chan *chan)
 				   flexrm_irq_thread,
 				   0, dev_name(ring->mbox->dev), ring);
 	if (ret) {
-		dev_err(ring->mbox->dev, "failed to request ring IRQ\n");
+		dev_err(ring->mbox->dev,
+			"failed to request ring%d IRQ\n", ring->num);
 		goto fail_free_cmpl_memory;
 	}
 	ring->irq_requested = true;
@@ -1291,7 +1318,9 @@ static int flexrm_startup(struct mbox_chan *chan)
 			&ring->irq_aff_hint);
 	ret = irq_set_affinity_hint(ring->irq, &ring->irq_aff_hint);
 	if (ret) {
-		dev_err(ring->mbox->dev, "failed to set IRQ affinity hint\n");
+		dev_err(ring->mbox->dev,
+			"failed to set IRQ affinity hint for ring%d\n",
+			ring->num);
 		goto fail_free_irq;
 	}
 
@@ -1381,9 +1410,9 @@ static void flexrm_shutdown(struct mbox_chan *chan)
 
 	/* Clear ring flush state */
 	timeout = 1000; /* timeout of 1s */
-	writel_relaxed(0x0, ring + RING_CONTROL);
+	writel_relaxed(0x0, ring->regs + RING_CONTROL);
 	do {
-		if (!(readl_relaxed(ring + RING_FLUSH_DONE) &
+		if (!(readl_relaxed(ring->regs + RING_FLUSH_DONE) &
 		      FLUSH_DONE_MASK))
 			break;
 		mdelay(1);
@@ -1516,6 +1545,43 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 		goto fail;
 	}
 	regs_end = mbox->regs + resource_size(iomem);
+
+	mbox->dme_rm_clk = devm_clk_get(&pdev->dev, "dme_rm_clk");
+	if (IS_ERR(mbox->dme_rm_clk)) {
+		ret = PTR_ERR(mbox->dme_rm_clk);
+		dev_err(&pdev->dev, "Failed to get dme_rm_clk ret:%d\n", ret);
+		goto fail;
+	}
+	ret = clk_prepare_enable(mbox->dme_rm_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to ena dme_rm_clk ret:%d\n", ret);
+		goto fail;
+	}
+
+	mbox->ae_clk = devm_clk_get(&pdev->dev, "ae_clk");
+	if (IS_ERR(mbox->ae_clk)) {
+		ret = PTR_ERR(mbox->ae_clk);
+		dev_err(&pdev->dev, "Failed to get ae_clk retcode:%d\n", ret);
+		goto fail;
+	}
+
+	ret = clk_prepare_enable(mbox->ae_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to enable ae_clk ret:%d\n", ret);
+		goto fail;
+	}
+
+	mbox->fs4_clk = devm_clk_get(&pdev->dev, "fs4_clk");
+	if (IS_ERR(mbox->fs4_clk)) {
+		ret = PTR_ERR(mbox->fs4_clk);
+		dev_err(&pdev->dev, "Failed to get fs4_clk ret:%d\n", ret);
+		goto fail;
+	}
+	ret = clk_prepare_enable(mbox->fs4_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to enable fs4_clk ret:%d\n", ret);
+		goto fail;
+	}
 
 	/* Scan and count available rings */
 	mbox->num_rings = 0;
@@ -1681,6 +1747,9 @@ static int flexrm_mbox_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(mbox->root);
 
 	platform_msi_domain_free_irqs(dev);
+	clk_disable_unprepare(mbox->fs4_clk);
+	clk_disable_unprepare(mbox->ae_clk);
+	clk_disable_unprepare(mbox->dme_rm_clk);
 
 	dma_pool_destroy(mbox->cmpl_pool);
 	dma_pool_destroy(mbox->bd_pool);

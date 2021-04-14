@@ -296,6 +296,7 @@ struct pci_dev {
 	void		*sysdata;	/* hook for sys-specific extension */
 	struct proc_dir_entry *procent;	/* device entry in /proc/bus/pci */
 	struct pci_slot	*slot;		/* Physical slot this device is in */
+	struct mutex bridge_lock;
 
 	unsigned int	devfn;		/* encoded device & function index */
 	unsigned short	vendor;
@@ -307,6 +308,7 @@ struct pci_dev {
 	u8		hdr_type;	/* PCI header type (`multi' flag masked out) */
 #ifdef CONFIG_PCIEAER
 	u16		aer_cap;	/* AER capability offset */
+	struct aer_stats *aer_stats;	/* AER stats for this device */
 #endif
 	u8		pcie_cap;	/* PCIe capability offset */
 	u8		msi_cap;	/* MSI capability offset */
@@ -371,6 +373,7 @@ struct pci_dev {
 
 	bool match_driver;		/* Skip attaching driver */
 	/* These fields are used by common fixups */
+	spinlock_t	lock;		/* Protect is_added and is_busmaster */
 	unsigned int	transparent:1;	/* Subtractive decode PCI bridge */
 	unsigned int	multifunction:1;/* Part of multi-function device */
 	/* keep track of device state */
@@ -1469,13 +1472,9 @@ static inline bool pcie_aspm_support_enabled(void) { return false; }
 #endif
 
 #ifdef CONFIG_PCIEAER
-void pci_no_aer(void);
 bool pci_aer_available(void);
-int pci_aer_init(struct pci_dev *dev);
 #else
-static inline void pci_no_aer(void) { }
 static inline bool pci_aer_available(void) { return false; }
-static inline int pci_aer_init(struct pci_dev *d) { return -ENODEV; }
 #endif
 
 #ifdef CONFIG_PCIE_ECRC

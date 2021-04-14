@@ -518,4 +518,26 @@ source "drivers/misc/mic/Kconfig"
 source "drivers/misc/genwqe/Kconfig"
 source "drivers/misc/echo/Kconfig"
 source "drivers/misc/cxl/Kconfig"
+source "drivers/misc/bcm-iproc-ftm/Kconfig"
+
+config NVME_LPM_SSR
+        bool "NVME LPM data-back support"
+        depends on ARCH_BCM_IPROC || COMPILE_TEST
+        depends on OF_GPIO
+        help
+          This module enables support for udpating SSR struct stored in NVM
+          memory and initiate data-back to nvme once poweloss interrupt gets
+          triggered indicating for data-backup.
+
+          If unsure, say N.
+
+config LPM_SSR_DISABLE_NVME
+        bool "Disable NVMe callbacks from SSR driver"
+        depends on NVME_LPM_SSR
+        default n
+        help
+          Disabling NVMe callbacks from SSR driver helps in, triggerig
+          low power mode and debugging SSR(SPI access) related issues,
+          without involving NVMe.
+
 endmenu

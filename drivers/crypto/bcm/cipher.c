@@ -2615,7 +2615,7 @@ static int aead_need_fallback(struct aead_request *req)
 	 */
 	if (((ctx->cipher.mode == CIPHER_MODE_GCM) ||
 	     (ctx->cipher.mode == CIPHER_MODE_CCM)) &&
-	    (req->assoclen == 0)) {
+	     ((req->assoclen == 0) || (req->cryptlen == 0))) {
 		if ((rctx->is_encrypt && (req->cryptlen == 0)) ||
 		    (!rctx->is_encrypt && (req->cryptlen == ctx->digestsize))) {
 			flow_log("AES GCM/CCM needs fallback for 0 len req\n");
@@ -4508,8 +4508,7 @@ static void spu_functions_register(struct device *dev,
 }
 
 /**
- * spu_mb_init() - Initialize mailbox client. Request ownership of a mailbox
- * channel for the SPU being probed.
+ * spu_mb_init() - Initialize mailbox client.
  * @dev:  SPU driver device structure
  *
  * Return: 0 if successful
@@ -4655,12 +4654,16 @@ static int spu_register_ahash(struct iproc_alg_s *driver_alg)
 	hash->halg.statesize = sizeof(struct spu_hash_export_s);
 
 	if (driver_alg->auth_info.mode != HASH_MODE_HMAC) {
-		hash->setkey = ahash_setkey;
 		hash->init = ahash_init;
 		hash->update = ahash_update;
 		hash->final = ahash_final;
 		hash->finup = ahash_finup;
 		hash->digest = ahash_digest;
+		if ((driver_alg->auth_info.alg == HASH_ALG_AES) &&
+		    ((driver_alg->auth_info.mode == HASH_MODE_XCBC) ||
+		    (driver_alg->auth_info.mode == HASH_MODE_CMAC))) {
+			hash->setkey = ahash_setkey;
+		}
 	} else {
 		hash->setkey = ahash_hmac_setkey;
 		hash->init = ahash_hmac_init;

@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/msi.h>
@@ -22,54 +23,70 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irqchip/arm-gic-v3.h>
+#include <linux/irqchip/chained_irq.h>
+#include <linux/pci-ecam.h>
 #include <linux/platform_device.h>
 #include <linux/of_address.h>
 #include <linux/of_pci.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/phy/phy.h>
-
 #include "pcie-iproc.h"
 
-#define EP_PERST_SOURCE_SELECT_SHIFT	2
-#define EP_PERST_SOURCE_SELECT		BIT(EP_PERST_SOURCE_SELECT_SHIFT)
-#define EP_MODE_SURVIVE_PERST_SHIFT	1
-#define EP_MODE_SURVIVE_PERST		BIT(EP_MODE_SURVIVE_PERST_SHIFT)
-#define RC_PCIE_RST_OUTPUT_SHIFT	0
-#define RC_PCIE_RST_OUTPUT		BIT(RC_PCIE_RST_OUTPUT_SHIFT)
-#define PAXC_RESET_MASK			0x7f
+#define EP_PERST_SOURCE_SELECT_SHIFT 2
+#define EP_PERST_SOURCE_SELECT       BIT(EP_PERST_SOURCE_SELECT_SHIFT)
+#define EP_MODE_SURVIVE_PERST_SHIFT  1
+#define EP_MODE_SURVIVE_PERST        BIT(EP_MODE_SURVIVE_PERST_SHIFT)
+#define RC_PCIE_RST_OUTPUT_SHIFT     0
+#define RC_PCIE_RST_OUTPUT           BIT(RC_PCIE_RST_OUTPUT_SHIFT)
+#define PAXC_RESET_MASK              0x7f
 
-#define GIC_V3_CFG_SHIFT		0
-#define GIC_V3_CFG			BIT(GIC_V3_CFG_SHIFT)
+#define GIC_V3_CFG_SHIFT             0
+#define GIC_V3_CFG                   BIT(GIC_V3_CFG_SHIFT)
 
-#define MSI_ENABLE_CFG_SHIFT		0
-#define MSI_ENABLE_CFG			BIT(MSI_ENABLE_CFG_SHIFT)
+#define MSI_ENABLE_CFG_SHIFT         0
+#define MSI_ENABLE_CFG               BIT(MSI_ENABLE_CFG_SHIFT)
 
-#define CFG_IND_ADDR_MASK		0x00001ffc
+#define CFG_IND_ADDR_MASK            0x00001ffc
 
-#define CFG_ADDR_BUS_NUM_SHIFT		20
-#define CFG_ADDR_BUS_NUM_MASK		0x0ff00000
-#define CFG_ADDR_DEV_NUM_SHIFT		15
-#define CFG_ADDR_DEV_NUM_MASK		0x000f8000
-#define CFG_ADDR_FUNC_NUM_SHIFT		12
-#define CFG_ADDR_FUNC_NUM_MASK		0x00007000
-#define CFG_ADDR_REG_NUM_SHIFT		2
-#define CFG_ADDR_REG_NUM_MASK		0x00000ffc
-#define CFG_ADDR_CFG_TYPE_SHIFT		0
-#define CFG_ADDR_CFG_TYPE_MASK		0x00000003
+#define CFG_ADDR_BUS_NUM_SHIFT       20
+#define CFG_ADDR_BUS_NUM_MASK        0x0ff00000
+#define CFG_ADDR_DEV_NUM_SHIFT       15
+#define CFG_ADDR_DEV_NUM_MASK        0x000f8000
+#define CFG_ADDR_FUNC_NUM_SHIFT      12
+#define CFG_ADDR_FUNC_NUM_MASK       0x00007000
+#define CFG_ADDR_REG_NUM_SHIFT       2
+#define CFG_ADDR_REG_NUM_MASK        0x00000ffc
+#define CFG_ADDR_CFG_TYPE_SHIFT      0
+#define CFG_ADDR_CFG_TYPE_MASK       0x00000003
 
-#define SYS_RC_INTX_MASK		0xf
+#define SYS_RC_INTX_MASK             0xf
 
-#define PCIE_PHYLINKUP_SHIFT		3
-#define PCIE_PHYLINKUP			BIT(PCIE_PHYLINKUP_SHIFT)
-#define PCIE_DL_ACTIVE_SHIFT		2
-#define PCIE_DL_ACTIVE			BIT(PCIE_DL_ACTIVE_SHIFT)
+#define PCIE_PHYLINKUP_SHIFT         3
+#define PCIE_PHYLINKUP               BIT(PCIE_PHYLINKUP_SHIFT)
+#define PCIE_DL_ACTIVE_SHIFT         2
+#define PCIE_DL_ACTIVE               BIT(PCIE_DL_ACTIVE_SHIFT)
 
-#define APB_ERR_EN_SHIFT		0
-#define APB_ERR_EN			BIT(APB_ERR_EN_SHIFT)
+#define CFG_RC_LTSSM                 0x1cf8
+#define CFG_RC_PHY_CTL               0x1804
+#define CFG_RC_LTSSM_TIMEOUT         1000
+#define CFG_RC_LTSSM_STATE_MASK      0xff
+#define CFG_RC_LTSSM_STATE_L1        0x1
 
-#define CFG_RETRY_STATUS		0xffff0001
-#define CFG_RETRY_STATUS_TIMEOUT_US	500000 /* 500 milliseconds */
+#define CFG_RC_CLR_LTSSM_HIST_SHIFT  29
+#define CFG_RC_CLR_LTSSM_HIST_MASK   BIT(CFG_RC_CLR_LTSSM_HIST_SHIFT)
+#define CFG_RC_CLR_RECOV_HIST_SHIFT  31
+#define CFG_RC_CLR_RECOV_HIST_MASK   BIT(CFG_RC_CLR_RECOV_HIST_SHIFT)
+
+#define APB_ERR_EN_SHIFT             0
+#define APB_ERR_EN                   BIT(APB_ERR_EN_SHIFT)
+
+#define CFG_RD_SUCCESS               0
+#define CFG_RD_UR                    1
+#define CFG_RD_CRS                   2
+#define CFG_RD_CA                    3
+#define CFG_RETRY_STATUS             0xffff0001
+#define CFG_RETRY_STATUS_TIMEOUT_US  500000 /* 500 milli-seconds. */
 
 /* derive the enum index of the outbound/inbound mapping registers */
 #define MAP_REG(base_reg, index)	((base_reg) + (index) * 2)
@@ -93,9 +110,23 @@
 #define IMAP_VALID_SHIFT		0
 #define IMAP_VALID			BIT(IMAP_VALID_SHIFT)
 
+#define IPROC_PCI_PM_CAP		0x48
+#define IPROC_PCI_PM_CAP_MASK		0xffff
 #define IPROC_PCI_EXP_CAP		0xac
 
 #define IPROC_PCIE_REG_INVALID		0xffff
+
+#define NUM_INTX                     4
+
+#define HOTPLUG_DEBOUNCE             100
+
+#define RO_FIELD(window)             BIT((window) << 1)
+#define RO_VALUE(window)             BIT(((window) << 1) + 1)
+/* All Windows are allowed */
+#define RO_ALL_WINDOW                0x33333333
+/* Wait on All Windows */
+#define RO_FIELD_ALL_WINDOW          0x11111111
+#define DYNAMIC_ORDER_MODE           0x5
 
 /**
  * iProc PCIe outbound mapping controller specific parameters
@@ -272,6 +303,7 @@ enum iproc_pcie_reg {
 
 	/* enable INTx */
 	IPROC_PCIE_INTX_EN,
+	IPROC_PCIE_INTX_CSR,
 
 	/* outbound address mapping */
 	IPROC_PCIE_OARR0,
@@ -295,11 +327,22 @@ enum iproc_pcie_reg {
 	IPROC_PCIE_IARR4,
 	IPROC_PCIE_IMAP4,
 
+	/* config read status */
+	IPROC_PCIE_CFG_RD_STATUS,
+
 	/* link status */
 	IPROC_PCIE_LINK_STATUS,
 
 	/* enable APB error for unsupported requests */
 	IPROC_PCIE_APB_ERR_EN,
+
+	/* Ordering Mode configuration registers */
+	IPROC_PCIE_ORDERING_CFG,
+	IPROC_PCIE_IMAP0_RO_CONTROL,
+	IPROC_PCIE_IMAP1_RO_CONTROL,
+	IPROC_PCIE_IMAP2_RO_CONTROL,
+	IPROC_PCIE_IMAP3_RO_CONTROL,
+	IPROC_PCIE_IMAP4_RO_CONTROL,
 
 	/* total number of core registers */
 	IPROC_PCIE_MAX_NUM_REG,
@@ -313,6 +356,7 @@ static const u16 iproc_pcie_reg_paxb_bcma[] = {
 	[IPROC_PCIE_CFG_ADDR]		= 0x1f8,
 	[IPROC_PCIE_CFG_DATA]		= 0x1fc,
 	[IPROC_PCIE_INTX_EN]		= 0x330,
+	[IPROC_PCIE_INTX_CSR]		= 0x334,
 	[IPROC_PCIE_LINK_STATUS]	= 0xf0c,
 };
 
@@ -324,6 +368,7 @@ static const u16 iproc_pcie_reg_paxb[] = {
 	[IPROC_PCIE_CFG_ADDR]		= 0x1f8,
 	[IPROC_PCIE_CFG_DATA]		= 0x1fc,
 	[IPROC_PCIE_INTX_EN]		= 0x330,
+	[IPROC_PCIE_INTX_CSR]		= 0x334,
 	[IPROC_PCIE_OARR0]		= 0xd20,
 	[IPROC_PCIE_OMAP0]		= 0xd40,
 	[IPROC_PCIE_OARR1]		= 0xd28,
@@ -340,6 +385,7 @@ static const u16 iproc_pcie_reg_paxb_v2[] = {
 	[IPROC_PCIE_CFG_ADDR]		= 0x1f8,
 	[IPROC_PCIE_CFG_DATA]		= 0x1fc,
 	[IPROC_PCIE_INTX_EN]		= 0x330,
+	[IPROC_PCIE_INTX_CSR]		= 0x334,
 	[IPROC_PCIE_OARR0]		= 0xd20,
 	[IPROC_PCIE_OMAP0]		= 0xd40,
 	[IPROC_PCIE_OARR1]		= 0xd28,
@@ -356,8 +402,15 @@ static const u16 iproc_pcie_reg_paxb_v2[] = {
 	[IPROC_PCIE_IMAP3]		= 0xe08,
 	[IPROC_PCIE_IARR4]		= 0xe68,
 	[IPROC_PCIE_IMAP4]		= 0xe70,
+	[IPROC_PCIE_CFG_RD_STATUS]	= 0xee0,
 	[IPROC_PCIE_LINK_STATUS]	= 0xf0c,
 	[IPROC_PCIE_APB_ERR_EN]		= 0xf40,
+	[IPROC_PCIE_ORDERING_CFG]	= 0x2000,
+	[IPROC_PCIE_IMAP0_RO_CONTROL]	= 0x201c,
+	[IPROC_PCIE_IMAP1_RO_CONTROL]	= 0x2020,
+	[IPROC_PCIE_IMAP2_RO_CONTROL]	= 0x2024,
+	[IPROC_PCIE_IMAP3_RO_CONTROL]	= 0x2028,
+	[IPROC_PCIE_IMAP4_RO_CONTROL]	= 0x202c,
 };
 
 /* iProc PCIe PAXC v1 registers */
@@ -383,6 +436,24 @@ static const u16 iproc_pcie_reg_paxc_v2[] = {
 	[IPROC_PCIE_CFG_DATA]		= 0x1fc,
 };
 
+static int iproc_pci_raw_config_read32(struct iproc_pcie *pcie,
+				       unsigned int devfn, int where,
+				       int size, u32 *val);
+static int iproc_pci_raw_config_write32(struct iproc_pcie *pcie,
+					unsigned int devfn, int where,
+					int size, u32 val);
+
+/*
+ * List of device IDs of controllers that have corrupted capability list that
+ * require SW fixup
+ */
+static const u16 iproc_pcie_corrupt_cap_did[] = {
+	0x16cd,
+	0x16f0,
+	0xd802,
+	0xd804
+};
+
 static inline struct iproc_pcie *iproc_data(struct pci_bus *bus)
 {
 	struct iproc_pcie *pcie;
@@ -391,7 +462,14 @@ static inline struct iproc_pcie *iproc_data(struct pci_bus *bus)
 
 	pcie = sys->private_data;
 #else
-	pcie = bus->sysdata;
+	struct pci_config_window *cfg;
+
+	if (acpi_disabled) {
+		pcie = bus->sysdata;
+	} else {
+		cfg = bus->sysdata;
+		pcie = cfg->priv;
+	}
 #endif
 	return pcie;
 }
@@ -427,6 +505,14 @@ static inline void iproc_pcie_write_reg(struct iproc_pcie *pcie,
 		return;
 
 	writel(val, pcie->base + offset);
+}
+
+static inline bool iproc_pcie_link_is_active(struct iproc_pcie *pcie)
+{
+	u32 val;
+
+	val = iproc_pcie_read_reg(pcie, IPROC_PCIE_LINK_STATUS);
+	return !!((val & PCIE_PHYLINKUP) && (val & PCIE_DL_ACTIVE));
 }
 
 /**
@@ -476,10 +562,12 @@ static void __iomem *iproc_pcie_map_ep_cfg_reg(struct iproc_pcie *pcie,
 	return (pcie->base + offset);
 }
 
-static unsigned int iproc_pcie_cfg_retry(void __iomem *cfg_data_p)
+static unsigned int iproc_pcie_cfg_retry(struct iproc_pcie *pcie,
+					 void __iomem *cfg_data_p)
 {
 	int timeout = CFG_RETRY_STATUS_TIMEOUT_US;
 	unsigned int data;
+	u32 status;
 
 	/*
 	 * As per PCIe spec r3.1, sec 2.3.2, CRS Software Visibility only
@@ -500,6 +588,18 @@ static unsigned int iproc_pcie_cfg_retry(void __iomem *cfg_data_p)
 	 */
 	data = readl(cfg_data_p);
 	while (data == CFG_RETRY_STATUS && timeout--) {
+		/*
+		 * Stingray B0 PAXB controller CRS state is set
+		 * in CFG_RD status register
+		 * This will handle the case where CFG_RETRY_STATUS is
+		 * valid config data.
+		 */
+		if (pcie->srp_check) {
+			status = iproc_pcie_read_reg(pcie,
+						     IPROC_PCIE_CFG_RD_STATUS);
+			if (status != CFG_RD_CRS)
+				return data;
+		}
 		udelay(1);
 		data = readl(cfg_data_p);
 	}
@@ -508,6 +608,68 @@ static unsigned int iproc_pcie_cfg_retry(void __iomem *cfg_data_p)
 		data = 0xffffffff;
 
 	return data;
+}
+
+static void iproc_pcie_cmd_fix(struct iproc_pcie *pcie, int where)
+
+{
+	u32 cmd;
+
+	if (pcie->ep_is_internal || !iproc_pcie_link_is_active(pcie))
+		return;
+
+	/*
+	 * When link is active, upon the first config read for vendor ID,
+	 * one needs to enable the memory access and bus master explicitly
+	 */
+	if ((where & ~0x3) == PCI_VENDOR_ID) {
+		iproc_pci_raw_config_read32(pcie, 0, PCI_COMMAND, 2, &cmd);
+		cmd |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+		iproc_pci_raw_config_write32(pcie, 0, PCI_COMMAND, 2, cmd);
+	}
+}
+
+static void iproc_pcie_fix_cap(struct iproc_pcie *pcie, int where, u32 *val)
+{
+	u32 i, dev_id;
+
+	switch (where & ~0x3) {
+	case PCI_VENDOR_ID:
+		dev_id = *val >> 16;
+
+		/*
+		 * Activate fixup for those controllers that have corrupted
+		 * capability list registers
+		 */
+		for (i = 0; i < ARRAY_SIZE(iproc_pcie_corrupt_cap_did); i++)
+			if (dev_id == iproc_pcie_corrupt_cap_did[i])
+				pcie->fix_paxc_cap = true;
+		break;
+
+	case IPROC_PCI_PM_CAP:
+		if (pcie->fix_paxc_cap) {
+			/* advertise PM, force next capability to PCIe */
+			*val &= ~IPROC_PCI_PM_CAP_MASK;
+			*val |= IPROC_PCI_EXP_CAP << 8 | PCI_CAP_ID_PM;
+		}
+		break;
+
+	case IPROC_PCI_EXP_CAP:
+		if (pcie->fix_paxc_cap) {
+			/* advertise root port, version 2, terminate here */
+			*val = (PCI_EXP_TYPE_ROOT_PORT << 4 | 2) << 16 |
+				PCI_CAP_ID_EXP;
+		}
+		break;
+
+	case IPROC_PCI_EXP_CAP + PCI_EXP_RTCTL:
+		/* Don't advertise CRS SV support */
+		*val &= ~(PCI_EXP_RTCAP_CRSVIS << 16);
+		break;
+
+	default:
+		break;
+	}
 }
 
 static int iproc_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
@@ -523,14 +685,13 @@ static int iproc_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
 
 	/* root complex access */
 	if (busno == 0) {
-		ret = pci_generic_config_read32(bus, devfn, where, size, val);
-		if (ret != PCIBIOS_SUCCESSFUL)
-			return ret;
+		iproc_pcie_cmd_fix(pcie, where);
 
-		/* Don't advertise CRS SV support */
-		if ((where & ~0x3) == IPROC_PCI_EXP_CAP + PCI_EXP_RTCTL)
-			*val &= ~(PCI_EXP_RTCAP_CRSVIS << 16);
-		return PCIBIOS_SUCCESSFUL;
+		ret = pci_generic_config_read32(bus, devfn, where, size, val);
+		if (ret == PCIBIOS_SUCCESSFUL)
+			iproc_pcie_fix_cap(pcie, where, val);
+
+		return ret;
 	}
 
 	cfg_data_p = iproc_pcie_map_ep_cfg_reg(pcie, busno, slot, fn, where);
@@ -538,11 +699,30 @@ static int iproc_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
 	if (!cfg_data_p)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	data = iproc_pcie_cfg_retry(cfg_data_p);
+	data = iproc_pcie_cfg_retry(pcie, cfg_data_p);
 
 	*val = data;
 	if (size <= 2)
 		*val = (data >> (8 * (where & 3))) & ((1 << (size * 8)) - 1);
+
+	/*
+	 * For PAXC and PAXCv2, the total number of PFs that one can enumerate
+	 * depends on the firmware configuration. Unfortunately, due to an ASIC
+	 * bug, unconfigured PFs cannot be properly hidden from the root
+	 * complex. As a result, write access to these PFs will cause bus lock
+	 * up on the embedded processor
+	 *
+	 * Since all unconfigured PFs are left with an incorrect, staled device
+	 * ID of 0x168e (PCI_DEVICE_ID_NX2_57810), we try to catch those access
+	 * early here and reject them all
+	 */
+#define DEVICE_ID_MASK     0xffff0000
+#define DEVICE_ID_SHIFT    16
+	if (pcie->rej_unconfig_pf &&
+	    (where & CFG_ADDR_REG_NUM_MASK) == PCI_VENDOR_ID)
+		if ((*val & DEVICE_ID_MASK) ==
+		    (PCI_DEVICE_ID_NX2_57810 << DEVICE_ID_SHIFT))
+			return PCIBIOS_FUNC_NOT_SUPPORTED;
 
 	return PCIBIOS_SUCCESSFUL;
 }
@@ -577,16 +757,20 @@ static void __iomem *iproc_pcie_map_cfg_bus(struct iproc_pcie *pcie,
 	 * PAXC is connected to an internally emulated EP within the SoC.  It
 	 * allows only one device.
 	 */
-	if (pcie->ep_is_internal)
+	if (pcie->ep_is_internal) {
 		if (slot > 0)
 			return NULL;
+
+		/* only enumerate up to supported number of PFs */
+		if (pcie->nr_pf && fn >= pcie->nr_pf)
+			return NULL;
+	}
 
 	return iproc_pcie_map_ep_cfg_reg(pcie, busno, slot, fn, where);
 }
 
-static void __iomem *iproc_pcie_bus_map_cfg_bus(struct pci_bus *bus,
-						unsigned int devfn,
-						int where)
+void __iomem *iproc_pcie_bus_map_cfg_bus(struct pci_bus *bus,
+					 unsigned int devfn, int where)
 {
 	return iproc_pcie_map_cfg_bus(iproc_data(bus), bus->number, devfn,
 				      where);
@@ -636,14 +820,24 @@ static int iproc_pci_raw_config_write32(struct iproc_pcie *pcie,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int iproc_pcie_config_read32(struct pci_bus *bus, unsigned int devfn,
-				    int where, int size, u32 *val)
+int iproc_pcie_config_read32(struct pci_bus *bus, unsigned int devfn,
+			     int where, int size, u32 *val)
 {
 	int ret;
 	struct iproc_pcie *pcie = iproc_data(bus);
 
+	if (!pcie->ep_is_internal) {
+		if (bus->number && ((where & ~0x3) == PCI_VENDOR_ID)) {
+			if (!iproc_pcie_link_is_active(pcie)) {
+				dev_dbg(pcie->dev,
+					"LinkDown so skipping downstream read req\n");
+				return PCIBIOS_DEVICE_NOT_FOUND;
+			}
+		}
+	}
+
 	iproc_pcie_apb_err_disable(bus, true);
-	if (pcie->type == IPROC_PCIE_PAXB_V2)
+	if (pcie->iproc_cfg_read)
 		ret = iproc_pcie_config_read(bus, devfn, where, size, val);
 	else
 		ret = pci_generic_config_read32(bus, devfn, where, size, val);
@@ -652,8 +846,8 @@ static int iproc_pcie_config_read32(struct pci_bus *bus, unsigned int devfn,
 	return ret;
 }
 
-static int iproc_pcie_config_write32(struct pci_bus *bus, unsigned int devfn,
-				     int where, int size, u32 val)
+int iproc_pcie_config_write32(struct pci_bus *bus, unsigned int devfn,
+			      int where, int size, u32 val)
 {
 	int ret;
 
@@ -670,7 +864,7 @@ static struct pci_ops iproc_pcie_ops = {
 	.write = iproc_pcie_config_write32,
 };
 
-static void iproc_pcie_perst_ctrl(struct iproc_pcie *pcie, bool assert)
+static void iproc_pcie_reset(struct iproc_pcie *pcie)
 {
 	u32 val;
 
@@ -682,33 +876,52 @@ static void iproc_pcie_perst_ctrl(struct iproc_pcie *pcie, bool assert)
 	if (pcie->ep_is_internal)
 		return;
 
-	if (assert) {
-		val = iproc_pcie_read_reg(pcie, IPROC_PCIE_CLK_CTRL);
-		val &= ~EP_PERST_SOURCE_SELECT & ~EP_MODE_SURVIVE_PERST &
-			~RC_PCIE_RST_OUTPUT;
-		iproc_pcie_write_reg(pcie, IPROC_PCIE_CLK_CTRL, val);
-		udelay(250);
-	} else {
-		val = iproc_pcie_read_reg(pcie, IPROC_PCIE_CLK_CTRL);
-		val |= RC_PCIE_RST_OUTPUT;
-		iproc_pcie_write_reg(pcie, IPROC_PCIE_CLK_CTRL, val);
-		msleep(100);
-	}
+	/*
+	 * Select perst_b signal as reset source. Put the device into reset,
+	 * and then bring it out of reset
+	 */
+	val = iproc_pcie_read_reg(pcie, IPROC_PCIE_CLK_CTRL);
+	val &= ~EP_PERST_SOURCE_SELECT & ~EP_MODE_SURVIVE_PERST &
+		~RC_PCIE_RST_OUTPUT;
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_CLK_CTRL, val);
+	udelay(250);
+
+	val |= RC_PCIE_RST_OUTPUT;
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_CLK_CTRL, val);
+	msleep(100);
 }
 
-int iproc_pcie_shutdown(struct iproc_pcie *pcie)
+static bool iproc_pci_hp_check_ltssm(struct iproc_pcie *pcie)
 {
-	iproc_pcie_perst_ctrl(pcie, true);
-	msleep(500);
+	u32 val, timeout = CFG_RC_LTSSM_TIMEOUT;
 
-	return 0;
+	/* Clear LTSSM history. */
+	iproc_pci_raw_config_read32(pcie, 0,
+				  CFG_RC_PHY_CTL, 4, &val);
+	iproc_pci_raw_config_write32(pcie, 0, CFG_RC_PHY_CTL, 4,
+				     val | CFG_RC_CLR_RECOV_HIST_MASK |
+				     CFG_RC_CLR_LTSSM_HIST_MASK);
+	/* write back the origional value. */
+	iproc_pci_raw_config_write32(pcie, 0, CFG_RC_PHY_CTL, 4, val);
+
+	do {
+		usleep_range(500, 1000);
+		iproc_pci_raw_config_read32(pcie, 0,
+					    CFG_RC_LTSSM, 4, &val);
+		/* check link state to see if link moved to L1 state. */
+		if ((val & CFG_RC_LTSSM_STATE_MASK) ==
+		     CFG_RC_LTSSM_STATE_L1)
+			return true;
+		timeout--;
+	} while (timeout);
+
+	return false;
 }
-EXPORT_SYMBOL_GPL(iproc_pcie_shutdown);
 
 static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 {
 	struct device *dev = pcie->dev;
-	u32 hdr_type, link_ctrl, link_status, class, val;
+	u32 hdr_type, link_ctrl, link_status, class;
 	bool link_is_active = false;
 
 	/*
@@ -717,12 +930,6 @@ static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 	 */
 	if (pcie->ep_is_internal)
 		return 0;
-
-	val = iproc_pcie_read_reg(pcie, IPROC_PCIE_LINK_STATUS);
-	if (!(val & PCIE_PHYLINKUP) || !(val & PCIE_DL_ACTIVE)) {
-		dev_err(dev, "PHY or data link is INACTIVE!\n");
-		return -ENODEV;
-	}
 
 	/* make sure we are not in EP mode */
 	iproc_pci_raw_config_read32(pcie, 0, PCI_HEADER_TYPE, 1, &hdr_type);
@@ -742,6 +949,13 @@ static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 	iproc_pci_raw_config_write32(pcie, 0, PCI_BRIDGE_CTRL_REG_OFFSET,
 				     4, class);
 
+	if (!iproc_pcie_link_is_active(pcie)) {
+		if (!iproc_pci_hp_check_ltssm(pcie)) {
+			dev_err(dev, "PHY or data link is INACTIVE!\n");
+			return -ENODEV;
+		}
+	}
+
 	/* check link status to see if link is active */
 	iproc_pci_raw_config_read32(pcie, 0, IPROC_PCI_EXP_CAP + PCI_EXP_LNKSTA,
 				    2, &link_status);
@@ -753,6 +967,8 @@ static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 #define PCI_TARGET_LINK_SPEED_MASK	0xf
 #define PCI_TARGET_LINK_SPEED_GEN2	0x2
 #define PCI_TARGET_LINK_SPEED_GEN1	0x1
+#define PCI_TARGET_LINK_WIDTH_MASK	0x3f
+#define PCI_TARGET_LINK_WIDTH_OFFSET	0x4
 		iproc_pci_raw_config_read32(pcie, 0,
 					    IPROC_PCI_EXP_CAP + PCI_EXP_LNKCTL2,
 					    4, &link_ctrl);
@@ -773,14 +989,102 @@ static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 		}
 	}
 
-	dev_info(dev, "link: %s\n", link_is_active ? "UP" : "DOWN");
+	if (link_is_active) {
+		dev_info(dev, "link UP @ Speed Gen-%d and width-x%d\n",
+				link_status & PCI_TARGET_LINK_SPEED_MASK,
+				(link_status >> PCI_TARGET_LINK_WIDTH_OFFSET) &
+				PCI_TARGET_LINK_WIDTH_MASK);
+	} else {
+		dev_info(dev, "link DOWN\n");
+	}
 
 	return link_is_active ? 0 : -ENODEV;
 }
 
-static void iproc_pcie_enable(struct iproc_pcie *pcie)
+static int iproc_pcie_intx_map(struct irq_domain *domain, unsigned int irq,
+			       irq_hw_number_t hwirq)
 {
+	irq_set_chip_and_handler(irq, &dummy_irq_chip, handle_simple_irq);
+	irq_set_chip_data(irq, domain->host_data);
+
+	return 0;
+}
+
+static const struct irq_domain_ops intx_domain_ops = {
+	.map = iproc_pcie_intx_map,
+};
+
+static void iproc_pcie_isr(struct irq_desc *desc)
+{
+	struct irq_chip *chip = irq_desc_get_chip(desc);
+	struct iproc_pcie *pcie;
+	struct device *dev;
+	unsigned long status;
+	u32 bit, virq;
+
+	chained_irq_enter(chip, desc);
+	pcie = irq_desc_get_handler_data(desc);
+	dev = pcie->dev;
+
+	/* go through INTx A, B, C, D until all interrupts are handled */
+	while ((status = iproc_pcie_read_reg(pcie, IPROC_PCIE_INTX_CSR) &
+		SYS_RC_INTX_MASK) != 0) {
+		for_each_set_bit(bit, &status, NUM_INTX) {
+			virq = irq_find_mapping(pcie->irq_domain, bit + 1);
+			if (virq)
+				generic_handle_irq(virq);
+			else
+				dev_err(dev, "unexpected INTx%u\n", bit);
+		}
+	}
+
+	chained_irq_exit(chip, desc);
+}
+
+static int iproc_pcie_intx_enable(struct iproc_pcie *pcie)
+{
+	struct device *dev = pcie->dev;
+	struct device_node *node = dev->of_node;
+	int ret;
+
 	iproc_pcie_write_reg(pcie, IPROC_PCIE_INTX_EN, SYS_RC_INTX_MASK);
+
+	/*
+	 * BCMA devices do not map INTx the same way as platform devices. All
+	 * BCMA needs is the above code to enable INTx
+	 */
+	if (pcie->irq <= 0)
+		return 0;
+
+	/* set IRQ handler */
+	irq_set_chained_handler_and_data(pcie->irq, iproc_pcie_isr, pcie);
+
+	/* add IRQ domain for INTx */
+	pcie->irq_domain = irq_domain_add_linear(node, NUM_INTX + 1,
+						 &intx_domain_ops, pcie);
+	if (!pcie->irq_domain) {
+		dev_err(dev, "failed to add INTx IRQ domain\n");
+		ret = -ENOMEM;
+		goto err_rm_handler_data;
+	}
+
+	return 0;
+
+err_rm_handler_data:
+	irq_set_chained_handler_and_data(pcie->irq, NULL, NULL);
+
+	return ret;
+}
+
+static void iproc_pcie_intx_disable(struct iproc_pcie *pcie)
+{
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_INTX_EN, 0x0);
+
+	if (pcie->irq <= 0)
+		return;
+
+	irq_domain_remove(pcie->irq_domain);
+	irq_set_chained_handler_and_data(pcie->irq, NULL, NULL);
 }
 
 static inline bool iproc_pcie_ob_is_valid(struct iproc_pcie *pcie,
@@ -823,14 +1127,14 @@ static inline int iproc_pcie_ob_write(struct iproc_pcie *pcie, int window_idx,
 	writel(lower_32_bits(pci_addr), pcie->base + omap_offset);
 	writel(upper_32_bits(pci_addr), pcie->base + omap_offset + 4);
 
-	dev_info(dev, "ob window [%d]: offset 0x%x axi %pap pci %pap\n",
-		 window_idx, oarr_offset, &axi_addr, &pci_addr);
-	dev_info(dev, "oarr lo 0x%x oarr hi 0x%x\n",
-		 readl(pcie->base + oarr_offset),
-		 readl(pcie->base + oarr_offset + 4));
-	dev_info(dev, "omap lo 0x%x omap hi 0x%x\n",
-		 readl(pcie->base + omap_offset),
-		 readl(pcie->base + omap_offset + 4));
+	dev_dbg(dev, "ob window [%d]: offset 0x%x axi %pap pci %pap\n",
+		window_idx, oarr_offset, &axi_addr, &pci_addr);
+	dev_dbg(dev, "oarr lo 0x%x oarr hi 0x%x\n",
+		readl(pcie->base + oarr_offset),
+		readl(pcie->base + oarr_offset + 4));
+	dev_dbg(dev, "omap lo 0x%x omap hi 0x%x\n",
+		readl(pcie->base + omap_offset),
+		readl(pcie->base + omap_offset + 4));
 
 	return 0;
 }
@@ -887,8 +1191,25 @@ static int iproc_pcie_setup_ob(struct iproc_pcie *pcie, u64 axi_addr,
 			resource_size_t window_size =
 				ob_map->window_sizes[size_idx] * SZ_1M;
 
-			if (size < window_size)
-				continue;
+			/*
+			 * Keep iterating until we reach the last window and
+			 * with the minimal window size at index zero. In this
+			 * case, we take a compromise by mapping it using the
+			 * minimum window size that can be supported
+			 */
+			if (size < window_size) {
+				if (size_idx > 0 || window_idx > 0)
+					continue;
+
+				/*
+				 * For the corner case of reaching the minimal
+				 * window size that can be supported on the
+				 * last window
+				 */
+				axi_addr = ALIGN_DOWN(axi_addr, window_size);
+				pci_addr = ALIGN_DOWN(pci_addr, window_size);
+				size = window_size;
+			}
 
 			if (!IS_ALIGNED(axi_addr, window_size) ||
 			    !IS_ALIGNED(pci_addr, window_size)) {
@@ -997,8 +1318,8 @@ static int iproc_pcie_ib_write(struct iproc_pcie *pcie, int region_idx,
 	    iproc_pcie_reg_is_invalid(imap_offset))
 		return -EINVAL;
 
-	dev_info(dev, "ib region [%d]: offset 0x%x axi %pap pci %pap\n",
-		 region_idx, iarr_offset, &axi_addr, &pci_addr);
+	dev_dbg(dev, "ib region [%d]: offset 0x%x axi %pap pci %pap\n",
+		region_idx, iarr_offset, &axi_addr, &pci_addr);
 
 	/*
 	 * Program the IARR registers.  The upper 32-bit IARR register is
@@ -1008,9 +1329,9 @@ static int iproc_pcie_ib_write(struct iproc_pcie *pcie, int region_idx,
 	       pcie->base + iarr_offset);
 	writel(upper_32_bits(pci_addr), pcie->base + iarr_offset + 4);
 
-	dev_info(dev, "iarr lo 0x%x iarr hi 0x%x\n",
-		 readl(pcie->base + iarr_offset),
-		 readl(pcie->base + iarr_offset + 4));
+	dev_dbg(dev, "iarr lo 0x%x iarr hi 0x%x\n",
+		readl(pcie->base + iarr_offset),
+		readl(pcie->base + iarr_offset + 4));
 
 	/*
 	 * Now program the IMAP registers.  Each IARR region may have one or
@@ -1024,10 +1345,10 @@ static int iproc_pcie_ib_write(struct iproc_pcie *pcie, int region_idx,
 		writel(upper_32_bits(axi_addr),
 		       pcie->base + imap_offset + ib_map->imap_addr_offset);
 
-		dev_info(dev, "imap window [%d] lo 0x%x hi 0x%x\n",
-			 window_idx, readl(pcie->base + imap_offset),
-			 readl(pcie->base + imap_offset +
-			       ib_map->imap_addr_offset));
+		dev_dbg(dev, "imap window [%d] lo 0x%x hi 0x%x\n",
+			window_idx, readl(pcie->base + imap_offset),
+			readl(pcie->base + imap_offset +
+			      ib_map->imap_addr_offset));
 
 		imap_offset += ib_map->imap_window_offset;
 		axi_addr += size;
@@ -1177,9 +1498,21 @@ static int iproc_pcie_paxb_v2_msi_steer(struct iproc_pcie *pcie, u64 msi_addr)
 	return ret;
 }
 
-static void iproc_pcie_paxc_v2_msi_steer(struct iproc_pcie *pcie, u64 msi_addr)
+static void iproc_pcie_paxc_v2_msi_steer(struct iproc_pcie *pcie, u64 msi_addr,
+					 bool enable)
 {
 	u32 val;
+
+	if (!enable) {
+		/*
+		 * Disable PAXC MSI steering. All write transfers will be
+		 * treated as non-MSI transfers
+		 */
+		val = iproc_pcie_read_reg(pcie, IPROC_PCIE_MSI_EN_CFG);
+		val &= ~MSI_ENABLE_CFG;
+		iproc_pcie_write_reg(pcie, IPROC_PCIE_MSI_EN_CFG, val);
+		return;
+	}
 
 	/*
 	 * Program bits [43:13] of address of GITS_TRANSLATER register into
@@ -1234,7 +1567,7 @@ static int iproc_pcie_msi_steer(struct iproc_pcie *pcie,
 			return ret;
 		break;
 	case IPROC_PCIE_PAXC_V2:
-		iproc_pcie_paxc_v2_msi_steer(pcie, msi_addr);
+		iproc_pcie_paxc_v2_msi_steer(pcie, msi_addr, true);
 		break;
 	default:
 		return -EINVAL;
@@ -1292,7 +1625,7 @@ static void iproc_pcie_msi_disable(struct iproc_pcie *pcie)
 	iproc_msi_exit(pcie);
 }
 
-static int iproc_pcie_rev_init(struct iproc_pcie *pcie)
+int iproc_pcie_rev_init(struct iproc_pcie *pcie)
 {
 	struct device *dev = pcie->dev;
 	unsigned int reg_idx;
@@ -1312,6 +1645,7 @@ static int iproc_pcie_rev_init(struct iproc_pcie *pcie)
 		break;
 	case IPROC_PCIE_PAXB_V2:
 		regs = iproc_pcie_reg_paxb_v2;
+		pcie->iproc_cfg_read = true;
 		pcie->has_apb_err_disable = true;
 		if (pcie->need_ob_cfg) {
 			pcie->ob_map = paxb_v2_ob_map;
@@ -1326,10 +1660,14 @@ static int iproc_pcie_rev_init(struct iproc_pcie *pcie)
 	case IPROC_PCIE_PAXC:
 		regs = iproc_pcie_reg_paxc;
 		pcie->ep_is_internal = true;
+		pcie->rej_unconfig_pf = true;
+		pcie->nr_pf = 4;
 		break;
 	case IPROC_PCIE_PAXC_V2:
 		regs = iproc_pcie_reg_paxc_v2;
 		pcie->ep_is_internal = true;
+		pcie->iproc_cfg_read = true;
+		pcie->rej_unconfig_pf = true;
 		pcie->need_msi_steer = true;
 		break;
 	default:
@@ -1353,13 +1691,123 @@ static int iproc_pcie_rev_init(struct iproc_pcie *pcie)
 	return 0;
 }
 
+int iproc_pcie_detect_enable(struct iproc_pcie *pcie)
+{
+	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie);
+	struct pci_bus *child;
+	int ret;
+
+	host->dev.parent = pcie->dev;
+	ret = pci_scan_root_bus_bridge(host);
+	if (ret < 0) {
+		dev_err(pcie->dev, "failed to scan host: %d\n", ret);
+		return ret;
+	}
+
+	pci_assign_unassigned_bus_resources(host->bus);
+
+	pcie->root_bus = host->bus;
+
+	list_for_each_entry(child, &host->bus->children, node)
+		pcie_bus_configure_settings(child);
+
+	pci_bus_add_devices(host->bus);
+
+	return 0;
+}
+
+ssize_t pcie_iproc_order_mode_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buff)
+{
+	uint32_t len;
+	struct iproc_pcie *pcie = container_of(attr, struct iproc_pcie,
+					       attr_order_mode);
+	if (!pcie->srp_check)
+		return sprintf(buff, "Not supported\n");
+
+	len = sprintf(buff, "0. Everything in strict order\n");
+	len += sprintf(buff + len, "1. Only IMAP2 in strict order\n");
+	len += sprintf(buff + len,
+		       "2. Only device memory in strict order (MSI/MSIX)\n");
+	len += sprintf(buff + len, "Current PAXB order configuration %d\n",
+		       pcie->order_cfg);
+
+	return len;
+}
+
+static void pcie_iproc_set_dynamic_oder(struct iproc_pcie *pcie)
+{
+	/* Set all IMAPs to relaxed order in dynamic order mode */
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_ORDERING_CFG,
+			     DYNAMIC_ORDER_MODE);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP0_RO_CONTROL,
+			     RO_ALL_WINDOW);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP1_RO_CONTROL,
+			     RO_ALL_WINDOW);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP2_RO_CONTROL,
+			     RO_ALL_WINDOW);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP3_RO_CONTROL,
+			     RO_ALL_WINDOW);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP4_RO_CONTROL,
+			     RO_ALL_WINDOW);
+}
+
+static
+ssize_t pcie_iproc_order_mode_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf,
+				    size_t count)
+{
+	struct iproc_pcie *pcie = container_of(attr, struct iproc_pcie,
+					       attr_order_mode);
+	unsigned long  val, regval;
+
+	if (!pcie->srp_check) {
+		dev_err(dev, "Not supported\n");
+		return -EINVAL;
+	}
+
+	if (kstrtoul(buf, 0, &val) < 0)
+		return -EINVAL;
+	if (val > PAXB_ORDER_DEV_MEM_ONLY) {
+		dev_err(dev, "Invalid Value passed %lu\n", val);
+		dev_err(dev, "0: Everything in strict order\n");
+		dev_err(dev, "1: Only IMAP2 in strict order\n");
+		dev_err(dev, "2: Only device memory in strict order (MSI/MSIX)\n");
+		return -EINVAL;
+	}
+
+	if (val == pcie->order_cfg)
+		return count;
+
+	if (val == PAXB_ORDER_IMAP2_ONLY) {
+		pcie_iproc_set_dynamic_oder(pcie);
+		regval = RO_ALL_WINDOW;
+		regval &= ~(RO_VALUE(0));
+		/* Set IMAP2 to strict order */
+		iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP2_RO_CONTROL, regval);
+		dev_info(dev, "RO_IMAP2 set to %#lx\n", regval);
+	} else if (val == PAXB_ORDER_DEV_MEM_ONLY) {
+		pcie_iproc_set_dynamic_oder(pcie);
+		/* Set IMAP0 to strict order */
+		iproc_pcie_write_reg(pcie, IPROC_PCIE_IMAP0_RO_CONTROL,
+				     RO_FIELD_ALL_WINDOW);
+		dev_info(dev, "RO_IMAP0 set to %#x\n", RO_FIELD_ALL_WINDOW);
+	} else
+		iproc_pcie_write_reg(pcie, IPROC_PCIE_ORDERING_CFG, 0);
+
+	pcie->order_cfg = val;
+	return count;
+}
+
 int iproc_pcie_setup(struct iproc_pcie *pcie, struct list_head *res)
 {
 	struct device *dev;
 	int ret;
 	void *sysdata;
-	struct pci_bus *child;
 	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie);
+	bool is_link_active;
 
 	dev = pcie->dev;
 
@@ -1373,6 +1821,14 @@ int iproc_pcie_setup(struct iproc_pcie *pcie, struct list_head *res)
 	if (ret)
 		return ret;
 
+#if CONFIG_PM_SLEEP
+	pcie->paxb_map_regs = devm_kcalloc(dev, IPROC_PCIE_MAX_NUM_REG * 2,
+					   sizeof(*pcie->paxb_map_regs),
+					   GFP_KERNEL);
+	if (!pcie->paxb_map_regs)
+		return -ENOMEM;
+#endif
+
 	ret = phy_init(pcie->phy);
 	if (ret) {
 		dev_err(dev, "unable to initialize PCIe PHY\n");
@@ -1385,8 +1841,7 @@ int iproc_pcie_setup(struct iproc_pcie *pcie, struct list_head *res)
 		goto err_exit_phy;
 	}
 
-	iproc_pcie_perst_ctrl(pcie, true);
-	iproc_pcie_perst_ctrl(pcie, false);
+	iproc_pcie_reset(pcie);
 
 	if (pcie->need_ob_cfg) {
 		ret = iproc_pcie_map_ranges(pcie, res);
@@ -1409,13 +1864,16 @@ int iproc_pcie_setup(struct iproc_pcie *pcie, struct list_head *res)
 	sysdata = pcie;
 #endif
 
-	ret = iproc_pcie_check_link(pcie);
+
+	is_link_active = iproc_pcie_check_link(pcie);
+	if (is_link_active)
+		dev_info(dev, "no PCIe EP device detected\n");
+
+	ret = iproc_pcie_intx_enable(pcie);
 	if (ret) {
-		dev_err(dev, "no PCIe EP device detected\n");
+		dev_err(dev, "failed to enable INTx\n");
 		goto err_power_off_phy;
 	}
-
-	iproc_pcie_enable(pcie);
 
 	if (IS_ENABLED(CONFIG_PCI_MSI))
 		if (iproc_pcie_msi_enable(pcie))
@@ -1423,27 +1881,25 @@ int iproc_pcie_setup(struct iproc_pcie *pcie, struct list_head *res)
 
 	list_splice_init(res, &host->windows);
 	host->busnr = 0;
-	host->dev.parent = dev;
 	host->ops = &iproc_pcie_ops;
 	host->sysdata = sysdata;
 	host->map_irq = pcie->map_irq;
 	host->swizzle_irq = pci_common_swizzle;
 
-	ret = pci_scan_root_bus_bridge(host);
+	ret = iproc_pcie_detect_enable(pcie);
 	if (ret < 0) {
-		dev_err(dev, "failed to scan host: %d\n", ret);
+		dev_err(dev, "failed to enable: %d\n", ret);
 		goto err_power_off_phy;
 	}
 
-	pci_assign_unassigned_bus_resources(host->bus);
-
-	pcie->root_bus = host->bus;
-
-	list_for_each_entry(child, &host->bus->children, node)
-		pcie_bus_configure_settings(child);
-
-	pci_bus_add_devices(host->bus);
-
+	if (pcie->type == IPROC_PCIE_PAXB_V2) {
+		pcie->attr_order_mode.store = pcie_iproc_order_mode_store;
+		pcie->attr_order_mode.show = pcie_iproc_order_mode_show;
+		pcie->attr_order_mode.attr.mode = 0644; /* S_IRUGO | S_IWUSR */
+		pcie->attr_order_mode.attr.name = "order_mode";
+		sysfs_attr_init(&pcie->attr_order_mode.attr);
+		device_create_file(pcie->dev, &pcie->attr_order_mode);
+	}
 	return 0;
 
 err_power_off_phy:
@@ -1456,10 +1912,14 @@ EXPORT_SYMBOL(iproc_pcie_setup);
 
 int iproc_pcie_remove(struct iproc_pcie *pcie)
 {
+	if (pcie->type == IPROC_PCIE_PAXB_V2)
+		device_remove_file(pcie->dev, &pcie->attr_order_mode);
+
 	pci_stop_root_bus(pcie->root_bus);
 	pci_remove_root_bus(pcie->root_bus);
 
 	iproc_pcie_msi_disable(pcie);
+	iproc_pcie_intx_disable(pcie);
 
 	phy_power_off(pcie->phy);
 	phy_exit(pcie->phy);
@@ -1467,6 +1927,235 @@ int iproc_pcie_remove(struct iproc_pcie *pcie)
 	return 0;
 }
 EXPORT_SYMBOL(iproc_pcie_remove);
+
+int iproc_pcie_save_paxb_map_regs(struct iproc_pcie *pcie)
+{
+	struct iproc_pcie_ib *ib = &pcie->ib;
+	int window_idx, region_idx;
+	u16 offset, iarr_offset, imap_offset;
+	unsigned int i, j = 0;
+
+	/* save outbound mapping registers */
+	for (i = IPROC_PCIE_OARR0; i <= IPROC_PCIE_OMAP3; i++) {
+		offset = iproc_pcie_reg_offset(pcie, i);
+
+		if (iproc_pcie_reg_is_invalid(offset))
+			continue;
+
+		pcie->paxb_map_regs[j++] = readl(pcie->base + offset);
+		pcie->paxb_map_regs[j++] = readl(pcie->base + offset + 4);
+	}
+
+	/* save inbound mapping registers */
+	for (region_idx = 0; region_idx < ib->nr_regions; region_idx++) {
+		const struct iproc_pcie_ib_map *ib_map =
+			&pcie->ib_map[region_idx];
+
+		iarr_offset = iproc_pcie_reg_offset(pcie,
+					MAP_REG(IPROC_PCIE_IARR0, region_idx));
+		imap_offset = iproc_pcie_reg_offset(pcie,
+					MAP_REG(IPROC_PCIE_IMAP0, region_idx));
+
+		if (iproc_pcie_reg_is_invalid(iarr_offset) ||
+		    iproc_pcie_reg_is_invalid(imap_offset))
+			continue;
+
+		pcie->paxb_map_regs[j++] = readl(pcie->base + iarr_offset);
+		pcie->paxb_map_regs[j++] = readl(pcie->base + iarr_offset + 4);
+
+		for (window_idx = 0; window_idx < ib_map->nr_windows;
+		     window_idx++) {
+			pcie->paxb_map_regs[j++] =
+					readl(pcie->base + imap_offset);
+			pcie->paxb_map_regs[j++] =
+					readl(pcie->base + imap_offset +
+					      ib_map->imap_addr_offset);
+
+			imap_offset += ib_map->imap_window_offset;
+		}
+	}
+	return 0;
+}
+
+int iproc_pcie_restore_paxb_map_regs(struct iproc_pcie *pcie)
+{
+	struct iproc_pcie_ib *ib = &pcie->ib;
+	int window_idx, region_idx;
+	u16 offset, iarr_offset, imap_offset;
+	unsigned int i, j = 0;
+
+	/* restore outbound mapping registers */
+	for (i = IPROC_PCIE_OARR0; i <= IPROC_PCIE_OMAP3; i++) {
+		offset = iproc_pcie_reg_offset(pcie, i);
+
+		if (iproc_pcie_reg_is_invalid(offset))
+			continue;
+
+		writel(pcie->paxb_map_regs[j++], pcie->base + offset);
+		writel(pcie->paxb_map_regs[j++], pcie->base + offset + 4);
+	}
+
+	/* restore inbound mapping registers */
+	for (region_idx = 0; region_idx < ib->nr_regions; region_idx++) {
+		const struct iproc_pcie_ib_map *ib_map =
+			&pcie->ib_map[region_idx];
+
+		iarr_offset = iproc_pcie_reg_offset(pcie,
+					MAP_REG(IPROC_PCIE_IARR0, region_idx));
+		imap_offset = iproc_pcie_reg_offset(pcie,
+					MAP_REG(IPROC_PCIE_IMAP0, region_idx));
+
+		if (iproc_pcie_reg_is_invalid(iarr_offset) ||
+		    iproc_pcie_reg_is_invalid(imap_offset))
+			continue;
+
+		writel(pcie->paxb_map_regs[j++], pcie->base + iarr_offset);
+		writel(pcie->paxb_map_regs[j++], pcie->base + iarr_offset + 4);
+
+		for (window_idx = 0; window_idx < ib_map->nr_windows;
+		     window_idx++) {
+			writel(pcie->paxb_map_regs[j++],
+			       pcie->base + imap_offset);
+			writel(pcie->paxb_map_regs[j++],
+			       pcie->base + imap_offset +
+			       ib_map->imap_addr_offset);
+
+			imap_offset += ib_map->imap_window_offset;
+		}
+	}
+	return 0;
+}
+
+int iproc_pcie_resume(struct iproc_pcie *pcie)
+{
+	int ret;
+
+	if (pcie->phy) {
+		ret = phy_init(pcie->phy);
+		if (ret) {
+			dev_err(pcie->dev, "unable to initialize PCIe PHY\n");
+			return ret;
+		}
+
+		ret = phy_power_on(pcie->phy);
+		if (ret) {
+			dev_err(pcie->dev, "unable to power on PCIe PHY\n");
+			goto err_exit_phy;
+		}
+	}
+
+	iproc_pcie_reset(pcie);
+
+	iproc_pcie_restore_paxb_map_regs(pcie);
+
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_INTX_EN, SYS_RC_INTX_MASK);
+	if (pcie->msi)
+		iproc_msi_enable(pcie->msi);
+
+	return 0;
+
+err_exit_phy:
+	phy_exit(pcie->phy);
+	return ret;
+}
+EXPORT_SYMBOL(iproc_pcie_resume);
+
+int iproc_pcie_suspend(struct iproc_pcie *pcie)
+{
+	if (pcie->msi)
+		iproc_msi_disable(pcie->msi);
+	iproc_pcie_write_reg(pcie, IPROC_PCIE_INTX_EN, 0x0);
+
+	iproc_pcie_save_paxb_map_regs(pcie);
+
+	if (pcie->phy) {
+		phy_power_off(pcie->phy);
+		phy_exit(pcie->phy);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(iproc_pcie_suspend);
+
+/**
+ * FIXME
+ * Hacky code to work around the ASIC issue with PAXC and Nitro
+ *
+ * 1. The bridge header fix should eventually be moved to pci/quirks.c
+ * 2. The Nitro fix should be moved to either Chimp firmware or the Nitro
+ * kernel driver, which we have no control at this point. Or, hopefully this
+ * may be fixed in NS2 B0
+ */
+static void quirk_paxc_bridge(struct pci_dev *pdev)
+{
+	struct iproc_pcie *pcie = iproc_data(pdev->bus);
+	int pf;
+
+	if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		pdev->class = PCI_CLASS_BRIDGE_PCI << 8;
+		return;
+	}
+#define MAX_NUM_PAXC_PF              4
+#define PAXC_CFG_ECM_ADDR_OFFSET     0x1e0
+#define PAXC_CFG_ECM_DBG_EN_SHIFT    31
+#define PAXC_CFG_ECM_DBG_EN          BIT(PAXC_CFG_ECM_DBG_EN_SHIFT)
+#define PAXC_CFG_FUNC_SHIFT          12
+#define PAXC_CFG_FUNC_MASK           0x7000
+#define PAXC_CFG_FUNC(pf)            (((pf) << PAXC_CFG_FUNC_SHIFT) & \
+				      PAXC_CFG_FUNC_MASK)
+#define PAXC_CFG_ECM_DATA_OFFSET     0x1e4
+
+#define NITRO_MSI_CFG_OFFSET         0x4c4
+#define NITRO_QSIZE_OFFSET           0x4c0
+	for (pf = 0; pf < MAX_NUM_PAXC_PF; pf++) {
+		u32 val;
+
+		/*
+		 * TODO:
+		 * Need to figure out what these hardcoded values mean.
+		 * It's unbelievable that after weeks of poking around and
+		 * digging, there's still no one who can point me to a proper
+		 * Nitro documentation
+		 */
+		val = PAXC_CFG_ECM_DBG_EN | PAXC_CFG_FUNC(pf) |
+			NITRO_MSI_CFG_OFFSET;
+		writel(val, pcie->base + PAXC_CFG_ECM_ADDR_OFFSET);
+		writel(0x4, pcie->base + PAXC_CFG_ECM_DATA_OFFSET);
+
+		val = PAXC_CFG_ECM_DBG_EN | PAXC_CFG_FUNC(pf) |
+			NITRO_QSIZE_OFFSET;
+		writel(val, pcie->base + PAXC_CFG_ECM_ADDR_OFFSET);
+		writel(0xba80b, pcie->base + PAXC_CFG_ECM_DATA_OFFSET);
+	}
+	writel(0, pcie->base + PAXC_CFG_ECM_ADDR_OFFSET);
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0x16cd, quirk_paxc_bridge);
+
+static void quirk_paxb_srp_check(struct pci_dev *pdev)
+{
+	struct iproc_pcie *pcie = iproc_data(pdev->bus);
+	/* CRS support is added in Stingray B0 */
+	pcie->srp_check = true;
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd714, quirk_paxb_srp_check);
+
+/*
+ * The MSI parsing logic within the PAXCv2 root complex block in Stingray A1/A2
+ * does not work and needs to be disabled
+ */
+static void quirk_paxc_disable_msi_parsing(struct pci_dev *pdev)
+{
+	struct iproc_pcie *pcie = iproc_data(pdev->bus);
+
+	if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE)
+		iproc_pcie_paxc_v2_msi_steer(pcie, 0, false);
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0x16f0,
+			quirk_paxc_disable_msi_parsing);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd802,
+			quirk_paxc_disable_msi_parsing);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd804,
+			quirk_paxc_disable_msi_parsing);
 
 MODULE_AUTHOR("Ray Jui <rjui@broadcom.com>");
 MODULE_DESCRIPTION("Broadcom iPROC PCIe common driver");

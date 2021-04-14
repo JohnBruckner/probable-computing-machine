@@ -31,72 +31,78 @@ static const struct of_device_id __iommu_of_table_sentinel
 	__used __section(__iommu_of_table_end);
 
 /**
- * of_get_dma_window - Parse *dma-window property and returns 0 if found.
+ * of_get_resv_region - Parse reserved-*-region property and returns 0 if found.
  *
  * @dn: device node
- * @prefix: prefix for property name if any
+ * @region: region for property name if any
  * @index: index to start to parse
- * @busno: Returns busno if supported. Otherwise pass NULL
- * @addr: Returns address that DMA starts
- * @size: Returns the range that DMA can handle
+ * @of_region: returns read of_iommu_resv_region <busno prot bus_addr size>
  *
- * This supports different formats flexibly. "prefix" can be
- * configured if any. "busno" and "index" are optionally
- * specified. Set 0(or NULL) if not used.
+ * This supports different formats using "region" configured if any.
  */
-int of_get_dma_window(struct device_node *dn, const char *prefix, int index,
-		      unsigned long *busno, dma_addr_t *addr, size_t *size)
+int of_get_resv_region(struct device_node *dn, const char *region, int *index,
+		      struct of_iommu_resv_region *of_region)
 {
-	const __be32 *dma_window, *end;
-	int bytes, cur_index = 0;
-	char propname[NAME_MAX], addrname[NAME_MAX], sizename[NAME_MAX];
+	char propname[NAME_MAX];
+	int na, ns, len, pos;
+	const __be32 *prop;
 
-	if (!dn || !addr || !size)
+	if (!dn || !of_region || !index)
 		return -EINVAL;
 
-	if (!prefix)
-		prefix = "";
+	if (!region)
+		region = "";
 
-	snprintf(propname, sizeof(propname), "%sdma-window", prefix);
-	snprintf(addrname, sizeof(addrname), "%s#dma-address-cells", prefix);
-	snprintf(sizename, sizeof(sizename), "%s#dma-size-cells", prefix);
+	prop = of_get_property(dn, "#region-address-cells", NULL);
+	na = prop ? be32_to_cpup(prop) : of_n_addr_cells(dn);
+	prop = of_get_property(dn, "#region-size-cells", NULL);
+	ns = prop ? be32_to_cpup(prop) : of_n_size_cells(dn);
 
-	dma_window = of_get_property(dn, propname, &bytes);
-	if (!dma_window)
-		return -ENODEV;
-	end = dma_window + bytes / sizeof(*dma_window);
+	snprintf(propname, sizeof(propname), "reserved-%s-region", region);
+	prop = of_get_property(dn, propname, &len);
+	if (!prop)
+		return -ENOENT;
 
-	while (dma_window < end) {
-		u32 cells;
-		const void *prop;
+	len /= sizeof(*prop);
+	pos = *index;
+	/* prot and busno takes one cell each */
+	if (pos >= len || (len - pos) % (na + ns + 2))
+		return -EINVAL;
 
-		/* busno is one cell if supported */
-		if (busno)
-			*busno = be32_to_cpup(dma_window++);
+	memset(of_region, 0, sizeof(*of_region));
+	of_region->busno = be32_to_cpup(prop + pos++);
+	of_region->prot = be32_to_cpup(prop + pos++);
+	if (of_region->prot && !(of_region->prot & IOMMU_PROT_FLAGS))
+		return -EINVAL;
 
-		prop = of_get_property(dn, addrname, NULL);
-		if (!prop)
-			prop = of_get_property(dn, "#address-cells", NULL);
-
-		cells = prop ? be32_to_cpup(prop) : of_n_addr_cells(dn);
-		if (!cells)
-			return -EINVAL;
-		*addr = of_read_number(dma_window, cells);
-		dma_window += cells;
-
-		prop = of_get_property(dn, sizename, NULL);
-		cells = prop ? be32_to_cpup(prop) : of_n_size_cells(dn);
-		if (!cells)
-			return -EINVAL;
-		*size = of_read_number(dma_window, cells);
-		dma_window += cells;
-
-		if (cur_index++ == index)
-			break;
-	}
+	of_region->bus_addr = of_read_number(prop + pos, na);
+	pos += na;
+	of_region->size = of_read_number(prop + pos, ns);
+	pos += ns;
+	*index = pos;
 	return 0;
+
 }
-EXPORT_SYMBOL_GPL(of_get_dma_window);
+EXPORT_SYMBOL_GPL(of_get_resv_region);
+
+void of_iommu_resv_dma_regions(struct device_node *np, struct list_head *list)
+{
+	struct of_iommu_resv_region of_region;
+	struct iommu_resv_region *region;
+	int index = 0;
+
+	while (!of_get_resv_region(np, "dma", &index, &of_region)) {
+		region = iommu_alloc_resv_region(of_region.bus_addr,
+						 of_region.size,
+						 of_region.prot,
+						 IOMMU_RESV_RESERVED);
+		if (!region)
+			break;
+
+		list_add_tail(&region->list, list);
+	}
+}
+EXPORT_SYMBOL_GPL(of_iommu_resv_dma_regions);
 
 static bool of_iommu_driver_present(struct device_node *np)
 {
@@ -150,8 +156,8 @@ static int of_pci_iommu_init(struct pci_dev *pdev, u16 alias, void *data)
 	int err;
 
 	err = of_pci_map_rid(info->np, alias, "iommu-map",
-			     "iommu-map-mask", &iommu_spec.np,
-			     iommu_spec.args);
+			     "iommu-map-mask", "iommu-map-drop-mask",
+			     &iommu_spec.np, iommu_spec.args);
 	if (err)
 		return err == -ENODEV ? NO_IOMMU : err;
 

@@ -14,8 +14,10 @@ controller, used in Stingray
 root complex is connected to emulated endpoint devices internal to the ASIC
 - reg: base address and length of the PCIe controller I/O register space
 - #interrupt-cells: set to <1>
+- interrupt-controller: claims itself as an interrupt controller for INTx
 - interrupt-map-mask and interrupt-map, standard PCI properties to define the
   mapping of the PCIe interface to interrupt numbers
+- interrupts: interrupt line wired to the generic GIC for INTx support
 - linux,pci-domain: PCI domain ID. Should be unique for each host controller
 - bus-range: PCI bus numbers covered
 - #address-cells: set to <3>
@@ -30,6 +32,9 @@ Optional properties:
 - dma-ranges: Some PAXB-based root complexes do not have inbound mapping done
   by the ASIC after power on reset.  In this case, SW is required to configure
 the mapping, based on inbound memory regions specified by this property.
+- reserved-dma-region: PAXBv2 with IOMMU enabled cannot provide mappings for
+  entire IOVA space specified by DMA mask. Hence this is used to reserve the
+  gaps in dma-ranges.
 
 - brcm,pcie-ob: Some iProc SoCs do not have the outbound address mapping done
 by the ASIC after power on reset. In this case, SW needs to configure it
@@ -77,9 +82,14 @@ Example:
 		compatible = "brcm,iproc-pcie";
 		reg = <0x18012000 0x1000>;
 
+		interrupt-controller;
 		#interrupt-cells = <1>;
-		interrupt-map-mask = <0 0 0 0>;
-		interrupt-map = <0 0 0 0 &gic GIC_SPI 100 IRQ_TYPE_NONE>;
+		interrupt-map-mask = <0 0 0 7>;
+		interrupt-map = <0 0 0 0 1 &pcie0 1>,
+				<0 0 0 0 2 &pcie0 2>,
+				<0 0 0 0 3 &pcie0 3>,
+				<0 0 0 0 4 &pcie0 4>;
+		interrupts = <GIC_SPI 100 IRQ_TYPE_NONE>;
 
 		linux,pci-domain = <0>;
 
@@ -91,7 +101,7 @@ Example:
 		ranges = <0x81000000 0 0	  0x28000000 0 0x00010000
 			  0x82000000 0 0x20000000 0x20000000 0 0x04000000>;
 
-		phys = <&phy 0 5>;
+		phys = <&pcie0_phy>;
 		phy-names = "pcie-phy";
 
 		brcm,pcie-ob;
@@ -115,9 +125,14 @@ Example:
 		compatible = "brcm,iproc-pcie";
 		reg = <0x18013000 0x1000>;
 
+		interrupt-controller;
 		#interrupt-cells = <1>;
-		interrupt-map-mask = <0 0 0 0>;
-		interrupt-map = <0 0 0 0 &gic GIC_SPI 106 IRQ_TYPE_NONE>;
+		interrupt-map-mask = <0 0 0 7>;
+		interrupt-map = <0 0 0 0 1 &pcie1 1>,
+				<0 0 0 0 2 &pcie1 2>,
+				<0 0 0 0 3 &pcie1 3>,
+				<0 0 0 0 4 &pcie1 4>;
+		interrupts = <GIC_SPI 106 IRQ_TYPE_NONE>;
 
 		linux,pci-domain = <1>;
 
@@ -129,6 +144,6 @@ Example:
 		ranges = <0x81000000 0 0	  0x48000000 0 0x00010000
 			  0x82000000 0 0x40000000 0x40000000 0 0x04000000>;
 
-		phys = <&phy 1 6>;
+		phys = <&pcie1_phy>;
 		phy-names = "pcie-phy";
 	};

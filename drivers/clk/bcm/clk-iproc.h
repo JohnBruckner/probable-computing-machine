@@ -81,6 +81,11 @@
 #define IPROC_CLK_PLL_RESET_ACTIVE_LOW BIT(9)
 
 /*
+ * Calculate the PLL parameters are runtime, instead of using table
+ */
+#define IPROC_CLK_PLL_CALC_PARAM BIT(10)
+
+/*
  * Parameters for VCO frequency configuration
  *
  * VCO frequency =
@@ -215,5 +220,7 @@ void iproc_asiu_setup(struct device_node *node,
 		      const struct iproc_asiu_div *div,
 		      const struct iproc_asiu_gate *gate,
 		      unsigned int num_clks);
+
+int iproc_audiomux_setup(struct device_node *node);
 
 #endif /* _CLK_IPROC_H */

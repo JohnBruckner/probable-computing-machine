@@ -1,3 +1,5 @@
+.idea/*
+
 #
 # NOTE! Don't add files that are generated in specific
 # subdirectories here. Add them in the ".gitignore" file
@@ -7,40 +9,31 @@
 # command after changing this file, to see if there are
 # any tracked files which get ignored after the change.
 #
-# Normal rules (sorted alphabetically)
+# Normal rules
 #
 .*
-*.a
-*.bin
-*.bz2
-*.c.[012]*.*
-*.dtb
-*.dtb.S
-*.dwo
-*.elf
-*.gcno
-*.gz
-*.i
-*.ko
-*.ll
-*.lst
-*.lz4
-*.lzma
-*.lzo
-*.mod.c
 *.o
 *.o.*
-*.order
-*.patch
+*.a
 *.s
+*.ko
 *.so
 *.so.dbg
-*.su
+*.mod.c
+*.i
+*.lst
 *.symtypes
-*.tar
-*.xz
-Module.symvers
+*.order
 modules.builtin
+*.elf
+*.bin
+*.gz
+*.bz2
+*.lzma
+*.xz
+*.lzo
+*.patch
+*.gcno
 
 #
 # Top-level generic files
@@ -49,38 +42,22 @@ modules.builtin
 /TAGS
 /linux
 /vmlinux
-/vmlinux.32
-/vmlinux-gdb.py
 /vmlinuz
 /System.map
 /Module.markers
+/Module.symvers
 
 #
-# RPM spec file (make rpm-pkg)
-#
-/*.spec
-
-#
-# Debian directory (make deb-pkg)
-#
-/debian/
-
-#
-# tar directory (make tar*-pkg)
-#
-/tar-install/
-
-#
-# git files that we don't want to ignore even if they are dot-files
+# git files that we don't want to ignore even it they are dot-files
 #
 !.gitignore
 !.mailmap
-!.cocciconfig
 
 #
 # Generated include files
 #
 include/config
+include/linux/version.h
 include/generated
 arch/*/include/generated
 
@@ -101,24 +78,6 @@ GRTAGS
 GSYMS
 GTAGS
 
-# id-utils files
-ID
-
 *.orig
 *~
 \#*#
-
-#
-# Leavings from module signing
-#
-extra_certificates
-signing_key.pem
-signing_key.priv
-signing_key.x509
-x509.genkey
-
-# Kconfig presets
-all.config
-
-# Kdevelop4
-*.kdev4

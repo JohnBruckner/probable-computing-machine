@@ -2299,6 +2299,9 @@ static void quirk_paxc_bridge(struct pci_dev *pdev)
 }
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0x16cd, quirk_paxc_bridge);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0x16f0, quirk_paxc_bridge);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd802, quirk_paxc_bridge);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd804, quirk_paxc_bridge);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_BROADCOM, 0xd750, quirk_paxc_bridge);
 #endif
 
 /* Originally in EDAC sources for i82875P:
@@ -3365,6 +3368,13 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0030, quirk_no_bus_reset);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0032, quirk_no_bus_reset);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003c, quirk_no_bus_reset);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0033, quirk_no_bus_reset);
+
+/*
+ * Root port on some Cavium CN8xxx chips do not successfully complete a bus
+ * reset when used with certain child devices.  After the reset, config
+ * accesses to the child may fail.
+ */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa100, quirk_no_bus_reset);
 
 static void quirk_no_pm_reset(struct pci_dev *dev)
 {
@@ -4847,3 +4857,27 @@ static void quirk_no_ats(struct pci_dev *pdev)
 /* AMD Stoney platform GPU */
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x98e4, quirk_no_ats);
 #endif /* CONFIG_PCI_ATS */
+
+/* Freescale PCIe doesn't support MSI in RC mode */
+static void quirk_fsl_no_msi(struct pci_dev *pdev)
+{
+	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT)
+		pdev->no_msi = 1;
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_FREESCALE, PCI_ANY_ID, quirk_fsl_no_msi);
+
+/*
+ * classless end points are not enumarted by pci framework, because
+ * of which, resources are not aligned into pci bus addresses, and
+ * hence, no BAR populated.
+ */
+static void quirk_avip_force_class(struct pci_dev *pdev)
+{
+	u32 class;
+
+	pci_read_config_dword(pdev, PCI_CLASS_REVISION, &class);
+	class = class >> 8;
+	if (class == PCI_CLASS_NOT_DEFINED)
+		pdev->class = PCI_CLASS_MEMORY_OTHER;
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CADENCE, PCI_DEVICE_ID_CADENCE_AVIP, quirk_avip_force_class);

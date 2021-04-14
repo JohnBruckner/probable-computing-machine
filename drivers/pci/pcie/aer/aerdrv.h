@@ -33,6 +33,10 @@
 					PCI_ERR_UNC_MALF_TLP)
 
 #define AER_MAX_MULTI_ERR_DEVICES	5	/* Not likely to have more */
+
+#define AER_MAX_TYPEOF_COR_ERRS		16	/* as per PCI_ERR_COR_STATUS */
+#define AER_MAX_TYPEOF_UNCOR_ERRS	26	/* as per PCI_ERR_UNCOR_STATUS*/
+
 struct aer_err_info {
 	struct pci_dev *dev[AER_MAX_MULTI_ERR_DEVICES];
 	int error_dev_num;
@@ -76,6 +80,42 @@ struct aer_rpc {
 					 */
 };
 
+/* AER stats for the device */
+struct aer_stats {
+
+	/*
+	 * Fields for all AER capable devices. They indicate the errors
+	 * "as seen by this device". Note that this may mean that if an
+	 * end point is causing problems, the AER counters may increment
+	 * at its link partner (e.g. root port) because the errors will be
+	 * "seen" by the link partner and not the the problematic end point
+	 * itself (which may report all counters as 0 as it never saw any
+	 * problems).
+	 */
+	/* Counters for different type of correctable errors */
+	u64 dev_cor_errs[AER_MAX_TYPEOF_COR_ERRS];
+	/* Counters for different type of fatal uncorrectable errors */
+	u64 dev_fatal_errs[AER_MAX_TYPEOF_UNCOR_ERRS];
+	/* Counters for different type of nonfatal uncorrectable errors */
+	u64 dev_nonfatal_errs[AER_MAX_TYPEOF_UNCOR_ERRS];
+	/* Total number of ERR_COR sent by this device */
+	u64 dev_total_cor_errs;
+	/* Total number of ERR_FATAL sent by this device */
+	u64 dev_total_fatal_errs;
+	/* Total number of ERR_NONFATAL sent by this device */
+	u64 dev_total_nonfatal_errs;
+
+	/*
+	 * Fields for Root ports & root complex event collectors only, these
+	 * indicate the total number of ERR_COR, ERR_FATAL, and ERR_NONFATAL
+	 * messages received by the root port / event collector, INCLUDING the
+	 * ones that are generated internally (by the rootport itself)
+	 */
+	u64 rootport_total_cor_errs;
+	u64 rootport_total_fatal_errs;
+	u64 rootport_total_nonfatal_errs;
+};
+
 struct aer_broadcast_data {
 	enum pci_channel_state state;
 	enum pci_ers_result result;
@@ -111,6 +151,8 @@ void aer_isr(struct work_struct *work);
 void aer_print_error(struct pci_dev *dev, struct aer_err_info *info);
 void aer_print_port_info(struct pci_dev *dev, struct aer_err_info *info);
 irqreturn_t aer_irq(int irq, void *context);
+void pci_rootport_aer_stats_incr(struct pci_dev *pdev,
+				 struct aer_err_source *e_src);
 
 #ifdef CONFIG_ACPI_APEI
 int pcie_aer_get_firmware_first(struct pci_dev *pci_dev);

@@ -1356,7 +1356,9 @@ static void pci_enable_bridge(struct pci_dev *dev)
 {
 	struct pci_dev *bridge;
 	int retval;
+	struct mutex *lock = &dev->bridge_lock;
 
+	mutex_lock(lock);
 	bridge = pci_upstream_bridge(dev);
 	if (bridge)
 		pci_enable_bridge(bridge);
@@ -1364,6 +1366,7 @@ static void pci_enable_bridge(struct pci_dev *dev)
 	if (pci_is_enabled(dev)) {
 		if (!dev->is_busmaster)
 			pci_set_master(dev);
+		mutex_unlock(lock);
 		return;
 	}
 
@@ -1372,6 +1375,7 @@ static void pci_enable_bridge(struct pci_dev *dev)
 		dev_err(&dev->dev, "Error enabling bridge (%d), continuing\n",
 			retval);
 	pci_set_master(dev);
+	mutex_unlock(lock);
 }
 
 static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags)
@@ -1643,6 +1647,7 @@ void pci_disable_enabled_device(struct pci_dev *dev)
 void pci_disable_device(struct pci_dev *dev)
 {
 	struct pci_devres *dr;
+	unsigned long flags;
 
 	dr = find_pci_dr(dev);
 	if (dr)
@@ -1656,7 +1661,9 @@ void pci_disable_device(struct pci_dev *dev)
 
 	do_pci_disable_device(dev);
 
+	spin_lock_irqsave(&dev->lock, flags);
 	dev->is_busmaster = 0;
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
 EXPORT_SYMBOL(pci_disable_device);
 
@@ -3580,6 +3587,7 @@ EXPORT_SYMBOL(devm_pci_remap_cfg_resource);
 static void __pci_set_master(struct pci_dev *dev, bool enable)
 {
 	u16 old_cmd, cmd;
+	unsigned long flags;
 
 	pci_read_config_word(dev, PCI_COMMAND, &old_cmd);
 	if (enable)
@@ -3591,7 +3599,9 @@ static void __pci_set_master(struct pci_dev *dev, bool enable)
 			enable ? "enabling" : "disabling");
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
+	spin_lock_irqsave(&dev->lock, flags);
 	dev->is_busmaster = enable;
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
 
 /**
@@ -3912,6 +3922,11 @@ static void pci_flr_wait(struct pci_dev *dev)
 	 */
 	pci_read_config_dword(dev, PCI_COMMAND, &id);
 	while (id == ~0) {
+		if (pci_dev_is_disconnected(dev)) {
+			dev_warn(&dev->dev, "device is disonnected\n");
+			return;
+		}
+
 		if (delay > timeout) {
 			dev_warn(&dev->dev, "not ready %dms after FLR; giving up\n",
 				 100 + delay - 1);

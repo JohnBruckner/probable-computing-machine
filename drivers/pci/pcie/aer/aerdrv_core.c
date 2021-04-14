@@ -97,10 +97,20 @@ int pci_cleanup_aer_error_status_regs(struct pci_dev *dev)
 	return 0;
 }
 
-int pci_aer_init(struct pci_dev *dev)
+void pci_aer_init(struct pci_dev *dev)
 {
 	dev->aer_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
-	return pci_cleanup_aer_error_status_regs(dev);
+
+	if (dev->aer_cap)
+		dev->aer_stats = kzalloc(sizeof(struct aer_stats), GFP_KERNEL);
+
+	pci_cleanup_aer_error_status_regs(dev);
+}
+
+void pci_aer_exit(struct pci_dev *dev)
+{
+	kfree(dev->aer_stats);
+	dev->aer_stats = NULL;
 }
 
 /**
@@ -725,7 +735,10 @@ static void aer_isr_one_error(struct pcie_device *p_device,
 		struct aer_err_source *e_src)
 {
 	struct aer_rpc *rpc = get_service_data(p_device);
+	struct pci_dev *pdev = p_device->port;
 	struct aer_err_info *e_info = &rpc->e_info;
+
+	pci_rootport_aer_stats_incr(pdev, e_src);
 
 	/*
 	 * There is a possibility that both correctable error and

@@ -88,6 +88,10 @@ static unsigned long iproc_asiu_clk_recalc_rate(struct clk_hw *hw,
 		return 0;
 	}
 
+	/* some clocks at the ASIU level do not have divisior */
+	if (clk->div.offset == IPROC_CLK_INVALID_OFFSET)
+		return 0;
+
 	/* if clock divisor is not enabled, simply return parent rate */
 	val = readl(asiu->div_base + clk->div.offset);
 	if ((val & (1 << clk->div.en_shift)) == 0) {
@@ -119,7 +123,7 @@ static long iproc_asiu_clk_round_rate(struct clk_hw *hw, unsigned long rate,
 	if (rate == *parent_rate)
 		return *parent_rate;
 
-	div = DIV_ROUND_UP(*parent_rate, rate);
+	div = DIV_ROUND_CLOSEST(*parent_rate, rate);
 	if (div < 2)
 		return *parent_rate;
 
@@ -137,6 +141,10 @@ static int iproc_asiu_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	if (rate == 0 || parent_rate == 0)
 		return -EINVAL;
 
+	/* some clocks at the ASIU level do not have divisior */
+	if (clk->div.offset == IPROC_CLK_INVALID_OFFSET)
+		return 0;
+
 	/* simply disable the divisor if one wants the same rate as parent */
 	if (rate == parent_rate) {
 		val = readl(asiu->div_base + clk->div.offset);
@@ -145,7 +153,7 @@ static int iproc_asiu_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 		return 0;
 	}
 
-	div = DIV_ROUND_UP(parent_rate, rate);
+	div = DIV_ROUND_CLOSEST(parent_rate, rate);
 	if (div < 2)
 		return -EINVAL;
 

@@ -37,6 +37,7 @@ config ARCH_BCM2835
 
 config ARCH_BCM_IPROC
 	bool "Broadcom iProc SoC Family"
+	select ARM64_MODULE_PLTS
 	select COMMON_CLK_IPROC
 	select GPIOLIB
 	select PINCTRL

@@ -74,52 +74,52 @@ static const char *aer_error_layer[] = {
 	"Transaction Layer"
 };
 
-static const char *aer_correctable_error_string[] = {
-	"Receiver Error",		/* Bit Position 0	*/
+static const char *aer_correctable_error_string[AER_MAX_TYPEOF_COR_ERRS] = {
+	"RxErr",			/* Bit Position 0	*/
 	NULL,
 	NULL,
 	NULL,
 	NULL,
 	NULL,
-	"Bad TLP",			/* Bit Position 6	*/
-	"Bad DLLP",			/* Bit Position 7	*/
-	"RELAY_NUM Rollover",		/* Bit Position 8	*/
+	"BadTLP",			/* Bit Position 6	*/
+	"BadDLLP",			/* Bit Position 7	*/
+	"Rollover",			/* Bit Position 8	*/
 	NULL,
 	NULL,
 	NULL,
-	"Replay Timer Timeout",		/* Bit Position 12	*/
-	"Advisory Non-Fatal",		/* Bit Position 13	*/
-	"Corrected Internal Error",	/* Bit Position 14	*/
-	"Header Log Overflow",		/* Bit Position 15	*/
+	"Timeout",			/* Bit Position 12	*/
+	"NonFatalErr",			/* Bit Position 13	*/
+	"CorrIntErr",			/* Bit Position 14	*/
+	"HeaderOF",			/* Bit Position 15	*/
 };
 
-static const char *aer_uncorrectable_error_string[] = {
+static const char *aer_uncorrectable_error_string[AER_MAX_TYPEOF_UNCOR_ERRS] = {
 	"Undefined",			/* Bit Position 0	*/
 	NULL,
 	NULL,
 	NULL,
-	"Data Link Protocol",		/* Bit Position 4	*/
-	"Surprise Down Error",		/* Bit Position 5	*/
+	"DLP",				/* Bit Position 4	*/
+	"SDES",				/* Bit Position 5	*/
 	NULL,
 	NULL,
 	NULL,
 	NULL,
 	NULL,
 	NULL,
-	"Poisoned TLP",			/* Bit Position 12	*/
-	"Flow Control Protocol",	/* Bit Position 13	*/
-	"Completion Timeout",		/* Bit Position 14	*/
-	"Completer Abort",		/* Bit Position 15	*/
-	"Unexpected Completion",	/* Bit Position 16	*/
-	"Receiver Overflow",		/* Bit Position 17	*/
-	"Malformed TLP",		/* Bit Position 18	*/
+	"TLP",				/* Bit Position 12	*/
+	"FCP",				/* Bit Position 13	*/
+	"CmpltTO",			/* Bit Position 14	*/
+	"CmpltAbrt",			/* Bit Position 15	*/
+	"UnxCmplt",			/* Bit Position 16	*/
+	"RxOF",				/* Bit Position 17	*/
+	"MalfTLP",			/* Bit Position 18	*/
 	"ECRC",				/* Bit Position 19	*/
-	"Unsupported Request",		/* Bit Position 20	*/
-	"ACS Violation",		/* Bit Position 21	*/
-	"Uncorrectable Internal Error",	/* Bit Position 22	*/
-	"MC Blocked TLP",		/* Bit Position 23	*/
-	"AtomicOp Egress Blocked",	/* Bit Position 24	*/
-	"TLP Prefix Blocked Error",	/* Bit Position 25	*/
+	"UnsupReq",			/* Bit Position 20	*/
+	"ACSViol",			/* Bit Position 21	*/
+	"UncorrIntErr",			/* Bit Position 22	*/
+	"BlockedTLP",			/* Bit Position 23	*/
+	"AtomicOpBlocked",		/* Bit Position 24	*/
+	"TLPBlockedErr",		/* Bit Position 25	*/
 };
 
 static const char *aer_agent_string[] = {
@@ -128,6 +128,144 @@ static const char *aer_agent_string[] = {
 	"Completer ID",
 	"Transmitter ID"
 };
+
+#define aer_stats_dev_attr(name, stats_array, strings_array,		\
+			   total_string, total_field)			\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+		     char *buf)						\
+{									\
+	unsigned int i;							\
+	char *str = buf;						\
+	struct pci_dev *pdev = to_pci_dev(dev);				\
+	u64 *stats = pdev->aer_stats->stats_array;			\
+									\
+	for (i = 0; i < ARRAY_SIZE(strings_array); i++) {		\
+		if (strings_array[i])					\
+			str += sprintf(str, "%s %llu\n",		\
+				       strings_array[i], stats[i]);	\
+		else if (stats[i])					\
+			str += sprintf(str, #stats_array "_bit[%d] %llu\n",\
+				       i, stats[i]);			\
+	}								\
+	str += sprintf(str, "TOTAL_%s %llu\n", total_string,		\
+		       pdev->aer_stats->total_field);			\
+	return str-buf;							\
+}									\
+static DEVICE_ATTR_RO(name)
+
+aer_stats_dev_attr(aer_dev_correctable, dev_cor_errs,
+		   aer_correctable_error_string, "ERR_COR",
+		   dev_total_cor_errs);
+aer_stats_dev_attr(aer_dev_fatal, dev_fatal_errs,
+		   aer_uncorrectable_error_string, "ERR_FATAL",
+		   dev_total_fatal_errs);
+aer_stats_dev_attr(aer_dev_nonfatal, dev_nonfatal_errs,
+		   aer_uncorrectable_error_string, "ERR_NONFATAL",
+		   dev_total_nonfatal_errs);
+
+#define aer_stats_rootport_attr(name, field)				\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+		     char *buf)						\
+{									\
+	struct pci_dev *pdev = to_pci_dev(dev);				\
+	return sprintf(buf, "%llu\n", pdev->aer_stats->field);		\
+}									\
+static DEVICE_ATTR_RO(name)
+
+aer_stats_rootport_attr(aer_rootport_total_err_cor,
+			rootport_total_cor_errs);
+aer_stats_rootport_attr(aer_rootport_total_err_fatal,
+			rootport_total_fatal_errs);
+aer_stats_rootport_attr(aer_rootport_total_err_nonfatal,
+			rootport_total_nonfatal_errs);
+
+static struct attribute *aer_stats_attrs[] __ro_after_init = {
+	&dev_attr_aer_dev_correctable.attr,
+	&dev_attr_aer_dev_fatal.attr,
+	&dev_attr_aer_dev_nonfatal.attr,
+	&dev_attr_aer_rootport_total_err_cor.attr,
+	&dev_attr_aer_rootport_total_err_fatal.attr,
+	&dev_attr_aer_rootport_total_err_nonfatal.attr,
+	NULL
+};
+
+static umode_t aer_stats_attrs_are_visible(struct kobject *kobj,
+					   struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (!pdev->aer_stats)
+		return 0;
+
+	if ((a == &dev_attr_aer_rootport_total_err_cor.attr ||
+	     a == &dev_attr_aer_rootport_total_err_fatal.attr ||
+	     a == &dev_attr_aer_rootport_total_err_nonfatal.attr) &&
+	    pci_pcie_type(pdev) != PCI_EXP_TYPE_ROOT_PORT)
+		return 0;
+
+	return a->mode;
+}
+
+const struct attribute_group aer_stats_attr_group = {
+	.attrs  = aer_stats_attrs,
+	.is_visible = aer_stats_attrs_are_visible,
+};
+
+static void pci_dev_aer_stats_incr(struct pci_dev *pdev,
+				   struct aer_err_info *info)
+{
+	int status, i, max = -1;
+	u64 *counter = NULL;
+	struct aer_stats *aer_stats = pdev->aer_stats;
+
+	if (!aer_stats)
+		return;
+
+	switch (info->severity) {
+	case AER_CORRECTABLE:
+		aer_stats->dev_total_cor_errs++;
+		counter = &aer_stats->dev_cor_errs[0];
+		max = AER_MAX_TYPEOF_COR_ERRS;
+		break;
+	case AER_NONFATAL:
+		aer_stats->dev_total_nonfatal_errs++;
+		counter = &aer_stats->dev_nonfatal_errs[0];
+		max = AER_MAX_TYPEOF_UNCOR_ERRS;
+		break;
+	case AER_FATAL:
+		aer_stats->dev_total_fatal_errs++;
+		counter = &aer_stats->dev_fatal_errs[0];
+		max = AER_MAX_TYPEOF_UNCOR_ERRS;
+		break;
+	}
+
+	status = (info->status & ~info->mask);
+	for (i = 0; i < max; i++)
+		if (status & (1 << i))
+			counter[i]++;
+}
+
+void pci_rootport_aer_stats_incr(struct pci_dev *pdev,
+				 struct aer_err_source *e_src)
+{
+	struct aer_stats *aer_stats = pdev->aer_stats;
+
+	if (!aer_stats)
+		return;
+
+	if (e_src->status & PCI_ERR_ROOT_COR_RCV)
+		aer_stats->rootport_total_cor_errs++;
+
+	if (e_src->status & PCI_ERR_ROOT_UNCOR_RCV) {
+		if (e_src->status & PCI_ERR_ROOT_FATAL_RCV)
+			aer_stats->rootport_total_fatal_errs++;
+		else
+			aer_stats->rootport_total_nonfatal_errs++;
+	}
+}
 
 static void __print_tlp_header(struct pci_dev *dev,
 			       struct aer_header_log_regs *t)
@@ -161,6 +299,7 @@ static void __aer_print_error(struct pci_dev *dev,
 			dev_err(&dev->dev, "   [%2d] Unknown Error Bit%s\n",
 				i, info->first_error == i ? " (First)" : "");
 	}
+	pci_dev_aer_stats_incr(dev, info);
 }
 
 void aer_print_error(struct pci_dev *dev, struct aer_err_info *info)

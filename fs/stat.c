@@ -20,6 +20,10 @@
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
+#ifdef CONFIG_POPCORN
+#include <popcorn/types.h>
+#include <popcorn/syscall_server.h>
+#endif
 
 /**
  * generic_fillattr - Fill in the basic attributes from the inode struct
@@ -270,6 +274,7 @@ SYSCALL_DEFINE2(lstat, const char __user *, filename,
 SYSCALL_DEFINE2(fstat, unsigned int, fd, struct __old_kernel_stat __user *, statbuf)
 {
 	struct kstat stat;
+
 	int error = vfs_fstat(fd, &stat);
 
 	if (!error)
@@ -371,8 +376,15 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
 {
 	struct kstat stat;
-	int error = vfs_fstat(fd, &stat);
+	int error;
 
+#ifdef CONFIG_POPCORN
+	if (distributed_remote_process(current)) {
+		error = redirect_fstat(fd, statbuf);
+		return error;
+	}
+#endif
+	error = vfs_fstat(fd, &stat);
 	if (!error)
 		error = cp_new_stat(&stat, statbuf);
 

@@ -367,4 +367,15 @@ int acpi_get_rc_resources(struct device *dev, const char *hid, u16 segment,
 			  struct resource *res);
 #endif
 
+#ifdef CONFIG_PCIEAER
+void pci_no_aer(void);
+void pci_aer_init(struct pci_dev *dev);
+void pci_aer_exit(struct pci_dev *dev);
+extern const struct attribute_group aer_stats_attr_group;
+#else
+static inline void pci_no_aer(void) { }
+static inline int pci_aer_init(struct pci_dev *d) { return -ENODEV; }
+static inline void pci_aer_exit(struct pci_dev *d) { }
+#endif
+
 #endif /* DRIVERS_PCI_H */

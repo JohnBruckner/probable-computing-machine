@@ -211,6 +211,9 @@ struct arm_smmu_device {
 
 	u32				num_global_irqs;
 	u32				num_context_irqs;
+	u32				reserved_context_banks;
+	u32				reserved_s2_context_banks;
+	u32				reserved_mapping_groups;
 	unsigned int			*irqs;
 
 	u32				cavium_id_base; /* Specific to Cavium */
@@ -1532,8 +1535,11 @@ static int arm_smmu_of_xlate(struct device *dev, struct of_phandle_args *args)
 static void arm_smmu_get_resv_regions(struct device *dev,
 				      struct list_head *head)
 {
+	struct iommu_fwspec *fwspec = dev->iommu_fwspec;
+	struct arm_smmu_device *smmu = fwspec_smmu(fwspec);
 	struct iommu_resv_region *region;
-	int prot = IOMMU_WRITE | IOMMU_NOEXEC | IOMMU_MMIO;
+	struct of_iommu_resv_region of_region;
+	int index = 0, prot = IOMMU_WRITE | IOMMU_NOEXEC | IOMMU_MMIO;
 
 	region = iommu_alloc_resv_region(MSI_IOVA_BASE, MSI_IOVA_LENGTH,
 					 prot, IOMMU_RESV_SW_MSI);
@@ -1542,6 +1548,15 @@ static void arm_smmu_get_resv_regions(struct device *dev,
 
 	list_add_tail(&region->list, head);
 
+	if (!of_get_resv_region(smmu->dev->of_node, "msi", &index,
+				&of_region)) {
+		region = iommu_alloc_resv_region(of_region.bus_addr,
+						 of_region.size,
+						 of_region.prot,
+						 IOMMU_RESV_DIRECT);
+		if (region)
+			list_add_tail(&region->list, head);
+	}
 	iommu_dma_get_resv_regions(dev, head);
 }
 
@@ -1755,6 +1770,12 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 	if (id & ID0_SMS) {
 		smmu->features |= ARM_SMMU_FEAT_STREAM_MATCH;
 		size = (id >> ID0_NUMSMRG_SHIFT) & ID0_NUMSMRG_MASK;
+		if (size < smmu->reserved_mapping_groups) {
+			dev_err(smmu->dev,
+				"invalid reserved mapping groups!\n");
+			return -ENODEV;
+		}
+		size -= smmu->reserved_mapping_groups;
 		if (size == 0) {
 			dev_err(smmu->dev,
 				"stream-matching supported, but no SMRs present!\n");
@@ -1801,7 +1822,17 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 			size * 2, (smmu->cb_base - gr0_base) * 2);
 
 	smmu->num_s2_context_banks = (id >> ID1_NUMS2CB_SHIFT) & ID1_NUMS2CB_MASK;
+	if (smmu->num_s2_context_banks < smmu->reserved_s2_context_banks) {
+		dev_err(smmu->dev, "invalid reserved S2 context banks!\n");
+		return -ENODEV;
+	}
+	smmu->num_s2_context_banks -= smmu->reserved_s2_context_banks;
 	smmu->num_context_banks = (id >> ID1_NUMCB_SHIFT) & ID1_NUMCB_MASK;
+	if (smmu->num_context_banks < smmu->reserved_context_banks) {
+		dev_err(smmu->dev, "invalid reserved context banks!\n");
+		return -ENODEV;
+	}
+	smmu->num_context_banks -= smmu->reserved_context_banks;
 	if (smmu->num_s2_context_banks > smmu->num_context_banks) {
 		dev_err(smmu->dev, "impossible number of S2 context banks!\n");
 		return -ENODEV;
@@ -1994,6 +2025,18 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev,
 		dev_err(dev, "missing #global-interrupts property\n");
 		return -ENODEV;
 	}
+
+	if (of_property_read_u32(dev->of_node, "reserved-context-banks",
+				 &smmu->reserved_context_banks))
+		smmu->reserved_context_banks = 0;
+
+	if (of_property_read_u32(dev->of_node, "reserved-s2-context-banks",
+				 &smmu->reserved_s2_context_banks))
+		smmu->reserved_s2_context_banks = 0;
+
+	if (of_property_read_u32(dev->of_node, "reserved-mapping-groups",
+				 &smmu->reserved_mapping_groups))
+		smmu->reserved_mapping_groups = 0;
 
 	data = of_device_get_match_data(dev);
 	smmu->version = data->version;
